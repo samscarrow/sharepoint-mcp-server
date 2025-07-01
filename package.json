@@ -1,0 +1,48 @@
+{
+  "name": "sharepoint-mcp-server",
+  "version": "0.1.0",
+  "description": "A Model Context Protocol server for browsing and interacting with Microsoft SharePoint sites and documents",
+  "private": false,
+  "type": "module",
+  "license": "MPL-2.0",
+  "author": "SharePoint MCP Server Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sekops/sharepoint-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sekops/sharepoint-mcp-server/issues"
+  },
+  "homepage": "https://github.com/sekops/sharepoint-mcp-server#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "sharepoint",
+    "microsoft-graph",
+    "claude",
+    "ai",
+    "assistant"
+  ],
+  "bin": {
+    "sharepoint-mcp-server": "./build/index.js"
+  },
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "prepare": "npm run build",
+    "watch": "tsc --watch",
+    "inspector": "npx @modelcontextprotocol/inspector build/index.js",
+    "test": "node test/basic-test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "0.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "typescript": "^5.3.3"
+  }
+}
