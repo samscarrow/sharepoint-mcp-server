@@ -384,6 +384,7 @@ class SharePointServer {
           query: {
             queryString: query,
           },
+          region: "US",
           size: limit,
         }],
       };
@@ -408,9 +409,11 @@ class SharePointServer {
     const searchTerm = args?.search;
     
     try {
-      let endpoint = "/sites?$select=id,displayName,name,webUrl,description";
+      let endpoint: string;
       if (searchTerm) {
-        endpoint += `&$filter=contains(displayName,'${searchTerm}')`;
+        endpoint = `/sites?search=${encodeURIComponent(searchTerm)}&$select=id,displayName,name,webUrl,description`;
+      } else {
+        endpoint = "/sites?$select=id,displayName,name,webUrl,description";
       }
 
       const response = await this.graphRequest(endpoint);
