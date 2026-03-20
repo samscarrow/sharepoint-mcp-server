@@ -22,7 +22,7 @@ import {
 /**
  * Environment variables required for SharePoint authentication
  */
-const { SHAREPOINT_URL, TENANT_ID, CLIENT_ID, CLIENT_SECRET, MAIL_USER } = process.env;
+const { SHAREPOINT_URL, TENANT_ID, CLIENT_ID, CLIENT_SECRET } = process.env;
 
 if (!SHAREPOINT_URL || !TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
   throw new Error(
@@ -30,7 +30,7 @@ if (!SHAREPOINT_URL || !TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
   );
 }
 
-const DEFAULT_MAIL_USER = MAIL_USER || "worshipservices@bayviewassociation.org";
+const MAIL_USER_HARDCODED = "worshipservices@bayviewassociation.org";
 
 /**
  * Interface for Microsoft Graph API responses
@@ -277,14 +277,10 @@ class SharePointServer {
         },
         {
           name: "list_emails",
-          description: "List recent emails from the mailbox. Returns subject, from, date, and preview.",
+          description: "List recent emails from the worshipservices@ mailbox. Returns subject, from, date, and preview.",
           inputSchema: {
             type: "object",
             properties: {
-              user: {
-                type: "string",
-                description: "Email address of the mailbox (default: worshipservices@bayviewassociation.org)",
-              },
               folder: {
                 type: "string",
                 description: "Mail folder to read from (default: inbox). Options: inbox, sentitems, drafts, deleteditems, archive",
@@ -304,14 +300,10 @@ class SharePointServer {
         },
         {
           name: "get_email",
-          description: "Get the full content of a specific email by ID",
+          description: "Get the full content of a specific email by ID from the worshipservices@ mailbox",
           inputSchema: {
             type: "object",
             properties: {
-              user: {
-                type: "string",
-                description: "Email address of the mailbox (default: worshipservices@bayviewassociation.org)",
-              },
               messageId: {
                 type: "string",
                 description: "The email message ID",
@@ -322,14 +314,10 @@ class SharePointServer {
         },
         {
           name: "search_emails",
-          description: "Search emails by keyword across subject, body, and sender",
+          description: "Search emails by keyword in the worshipservices@ mailbox",
           inputSchema: {
             type: "object",
             properties: {
-              user: {
-                type: "string",
-                description: "Email address of the mailbox (default: worshipservices@bayviewassociation.org)",
-              },
               query: {
                 type: "string",
                 description: "Search query (searches subject, body, sender, recipients)",
@@ -651,7 +639,7 @@ class SharePointServer {
    * Handle list emails tool request
    */
   private async handleListEmails(args: any) {
-    const user = args?.user || DEFAULT_MAIL_USER;
+    const user = MAIL_USER_HARDCODED;
     const folder = args?.folder || "inbox";
     const top = Math.min(args?.top || 10, 50);
     const filter = args?.filter;
@@ -689,7 +677,7 @@ class SharePointServer {
    * Handle get email tool request
    */
   private async handleGetEmail(args: any) {
-    const user = args?.user || DEFAULT_MAIL_USER;
+    const user = MAIL_USER_HARDCODED;
     const messageId = args?.messageId;
 
     if (typeof messageId !== "string") {
@@ -727,7 +715,7 @@ class SharePointServer {
    * Handle search emails tool request
    */
   private async handleSearchEmails(args: any) {
-    const user = args?.user || DEFAULT_MAIL_USER;
+    const user = MAIL_USER_HARDCODED;
     const query = args?.query;
     const top = Math.min(args?.top || 10, 50);
 
