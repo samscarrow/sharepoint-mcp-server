@@ -22,13 +22,15 @@ import {
 /**
  * Environment variables required for SharePoint authentication
  */
-const { SHAREPOINT_URL, TENANT_ID, CLIENT_ID, CLIENT_SECRET } = process.env;
+const { SHAREPOINT_URL, TENANT_ID, CLIENT_ID, CLIENT_SECRET, MAIL_USER } = process.env;
 
 if (!SHAREPOINT_URL || !TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
   throw new Error(
     "Required environment variables: SHAREPOINT_URL, TENANT_ID, CLIENT_ID, CLIENT_SECRET"
   );
 }
+
+const DEFAULT_MAIL_USER = MAIL_USER || "worshipservices@bayviewassociation.org";
 
 /**
  * Interface for Microsoft Graph API responses
@@ -273,6 +275,74 @@ class SharePointServer {
             required: ["siteUrl", "filePath"],
           },
         },
+        {
+          name: "list_emails",
+          description: "List recent emails from the mailbox. Returns subject, from, date, and preview.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              user: {
+                type: "string",
+                description: "Email address of the mailbox (default: worshipservices@bayviewassociation.org)",
+              },
+              folder: {
+                type: "string",
+                description: "Mail folder to read from (default: inbox). Options: inbox, sentitems, drafts, deleteditems, archive",
+                default: "inbox",
+              },
+              top: {
+                type: "number",
+                description: "Number of emails to return (default: 10, max: 50)",
+                default: 10,
+              },
+              filter: {
+                type: "string",
+                description: "OData filter expression (e.g. \"from/emailAddress/address eq 'someone@example.com'\" or \"isRead eq false\")",
+              },
+            },
+          },
+        },
+        {
+          name: "get_email",
+          description: "Get the full content of a specific email by ID",
+          inputSchema: {
+            type: "object",
+            properties: {
+              user: {
+                type: "string",
+                description: "Email address of the mailbox (default: worshipservices@bayviewassociation.org)",
+              },
+              messageId: {
+                type: "string",
+                description: "The email message ID",
+              },
+            },
+            required: ["messageId"],
+          },
+        },
+        {
+          name: "search_emails",
+          description: "Search emails by keyword across subject, body, and sender",
+          inputSchema: {
+            type: "object",
+            properties: {
+              user: {
+                type: "string",
+                description: "Email address of the mailbox (default: worshipservices@bayviewassociation.org)",
+              },
+              query: {
+                type: "string",
+                description: "Search query (searches subject, body, sender, recipients)",
+              },
+              top: {
+                type: "number",
+                description: "Number of results to return (default: 10, max: 50)",
+                default: 10,
+              },
+            },
+            required: ["query"],
+          },
+        },
       ],
     }));
 
@@ -291,6 +361,12 @@ class SharePointServer {
             return await this.handleListDriveItems(request.params.arguments);
           case "get_file_content":
             return await this.handleGetFileContent(request.params.arguments);
+          case "list_emails":
+            return await this.handleListEmails(request.params.arguments);
+          case "get_email":
+            return await this.handleGetEmail(request.params.arguments);
+          case "search_emails":
+            return await this.handleSearchEmails(request.params.arguments);
           default:
             throw new McpError(
               ErrorCode.MethodNotFound,
@@ -568,6 +644,118 @@ class SharePointServer {
       };
     } catch (error) {
       throw new Error(`Failed to get file content: ${error}`);
+    }
+  }
+
+  /**
+   * Handle list emails tool request
+   */
+  private async handleListEmails(args: any) {
+    const user = args?.user || DEFAULT_MAIL_USER;
+    const folder = args?.folder || "inbox";
+    const top = Math.min(args?.top || 10, 50);
+    const filter = args?.filter;
+
+    try {
+      let endpoint = `/users/${user}/mailFolders/${folder}/messages?$top=${top}&$select=id,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview&$orderby=receivedDateTime desc`;
+      if (filter) {
+        endpoint += `&$filter=${encodeURIComponent(filter)}`;
+      }
+
+      const response = await this.graphRequest(endpoint);
+      const messages = (response.value || []).map((m: any) => ({
+        id: m.id,
+        subject: m.subject,
+        from: m.from?.emailAddress?.address,
+        fromName: m.from?.emailAddress?.name,
+        to: m.toRecipients?.map((r: any) => r.emailAddress?.address),
+        date: m.receivedDateTime,
+        isRead: m.isRead,
+        preview: m.bodyPreview,
+      }));
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(messages, null, 2),
+        }],
+      };
+    } catch (error) {
+      throw new Error(`Failed to list emails: ${error}`);
+    }
+  }
+
+  /**
+   * Handle get email tool request
+   */
+  private async handleGetEmail(args: any) {
+    const user = args?.user || DEFAULT_MAIL_USER;
+    const messageId = args?.messageId;
+
+    if (typeof messageId !== "string") {
+      throw new McpError(ErrorCode.InvalidParams, "messageId parameter must be a string");
+    }
+
+    try {
+      const message = await this.graphRequest(
+        `/users/${user}/messages/${messageId}?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments,importance`
+      );
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            id: message.id,
+            subject: message.subject,
+            from: message.from?.emailAddress,
+            to: message.toRecipients?.map((r: any) => r.emailAddress),
+            cc: message.ccRecipients?.map((r: any) => r.emailAddress),
+            date: message.receivedDateTime,
+            hasAttachments: message.hasAttachments,
+            importance: message.importance,
+            body: message.body?.content,
+            bodyType: message.body?.contentType,
+          }, null, 2),
+        }],
+      };
+    } catch (error) {
+      throw new Error(`Failed to get email: ${error}`);
+    }
+  }
+
+  /**
+   * Handle search emails tool request
+   */
+  private async handleSearchEmails(args: any) {
+    const user = args?.user || DEFAULT_MAIL_USER;
+    const query = args?.query;
+    const top = Math.min(args?.top || 10, 50);
+
+    if (typeof query !== "string") {
+      throw new McpError(ErrorCode.InvalidParams, "query parameter must be a string");
+    }
+
+    try {
+      const endpoint = `/users/${user}/messages?$search="${encodeURIComponent(query)}"&$top=${top}&$select=id,subject,from,receivedDateTime,bodyPreview&$orderby=receivedDateTime desc`;
+
+      const response = await this.graphRequest(endpoint);
+      const messages = (response.value || []).map((m: any) => ({
+        id: m.id,
+        subject: m.subject,
+        from: m.from?.emailAddress?.address,
+        fromName: m.from?.emailAddress?.name,
+        date: m.receivedDateTime,
+        preview: m.bodyPreview,
+      }));
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(messages, null, 2),
+        }],
+      };
+    } catch (error) {
+      throw new Error(`Failed to search emails: ${error}`);
     }
   }
 
