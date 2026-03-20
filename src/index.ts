@@ -736,7 +736,7 @@ class SharePointServer {
     }
 
     try {
-      const endpoint = `/users/${user}/messages?$search="${encodeURIComponent(query)}"&$top=${top}&$select=id,subject,from,receivedDateTime,bodyPreview&$orderby=receivedDateTime desc`;
+      const endpoint = `/users/${user}/messages?$search="${encodeURIComponent(query)}"&$top=${top}&$select=id,subject,from,receivedDateTime,bodyPreview`;
 
       const response = await this.graphRequest(endpoint);
       const messages = (response.value || []).map((m: any) => ({
