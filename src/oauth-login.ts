@@ -24,7 +24,7 @@ if (!TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
 }
 
 const REDIRECT_URI = "http://localhost:3000/callback";
-const SCOPES = "Mail.ReadWrite Mail.Send Files.Read.All offline_access";
+const SCOPES = "Mail.ReadWrite Mail.Send Files.Read.All Calendars.ReadWrite Calendars.Read.Shared offline_access";
 const TOKEN_FILE =
   process.env.TOKEN_FILE ||
   path.join(process.env.HOME || "/tmp", ".config", "bay-view-graph", "tokens.json");
