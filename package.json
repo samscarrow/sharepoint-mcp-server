@@ -40,7 +40,8 @@
     "oauth-login": "node build/oauth-login.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "0.6.0"
+    "@modelcontextprotocol/sdk": "0.6.0",
+    "jszip": "^3.10.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.24",

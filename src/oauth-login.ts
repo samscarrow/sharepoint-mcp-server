@@ -24,7 +24,7 @@ if (!TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
 }
 
 const REDIRECT_URI = "http://localhost:3000/callback";
-const SCOPES = "Mail.ReadWrite Mail.Send Files.Read Files.Read.All Files.ReadWrite Files.ReadWrite.All Calendars.Read Calendars.ReadBasic Calendars.ReadWrite Calendars.Read.Shared offline_access";
+const SCOPES = "Mail.ReadWrite Mail.Send Files.Read Files.Read.All Files.ReadWrite Files.ReadWrite.All Sites.ReadWrite.All Calendars.Read Calendars.ReadBasic Calendars.ReadWrite Calendars.Read.Shared ChannelMessage.Send Tasks.ReadWrite offline_access";
 const TOKEN_FILE =
   process.env.TOKEN_FILE ||
   path.join(process.env.HOME || "/tmp", ".config", "bay-view-graph", "tokens.json");
