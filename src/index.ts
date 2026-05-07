@@ -416,7 +416,7 @@ class SharePointServer {
         {
           name: "get_file_content",
           description:
-            "Get the content of a file. PDFs and Office documents (.docx, .doc, .pptx, .xlsx) are automatically converted to text. scope=tenant reads from SharePoint; scope=me reads from your OneDrive.",
+            "Get the content of a file. .pdf, .docx, .xlsx, and .pptx are automatically converted to text (xlsx as TSV per sheet). Other binary formats are returned raw and may be unreadable. scope=tenant reads from SharePoint; scope=me reads from your OneDrive.",
           inputSchema: {
             type: "object",
             properties: {
@@ -1303,6 +1303,141 @@ class SharePointServer {
     return new URL(filePath).pathname;
   }
 
+  private decodeXmlEntities(s: string): string {
+    return s
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+      .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+      .replace(/&amp;/g, "&");
+  }
+
+  private xmlInnerText(xml: string): string {
+    return this.decodeXmlEntities(xml.replace(/<[^>]+>/g, ""));
+  }
+
+  private colLetterToIndex(col: string): number {
+    let n = 0;
+    for (const ch of col) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n - 1;
+  }
+
+  private async extractXlsxText(buf: ArrayBuffer): Promise<string> {
+    const zip = await JSZip.loadAsync(buf);
+
+    const sharedStrings: string[] = [];
+    const ssFile = zip.file("xl/sharedStrings.xml");
+    if (ssFile) {
+      const xml = await ssFile.async("string");
+      const siMatches = xml.match(/<si\b[^>]*>[\s\S]*?<\/si>/g) || [];
+      for (const si of siMatches) {
+        const parts = [...si.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((m) =>
+          this.decodeXmlEntities(m[1])
+        );
+        sharedStrings.push(parts.join(""));
+      }
+    }
+
+    const wbFile = zip.file("xl/workbook.xml");
+    const wbRelsFile = zip.file("xl/_rels/workbook.xml.rels");
+    type SheetEntry = { name: string; target: string };
+    const sheets: SheetEntry[] = [];
+    if (wbFile && wbRelsFile) {
+      const wbXml = await wbFile.async("string");
+      const relsXml = await wbRelsFile.async("string");
+      const relMap = new Map<string, string>();
+      for (const m of relsXml.matchAll(/<Relationship\b[^>]*\/>/g)) {
+        const tag = m[0];
+        const id = /Id="([^"]+)"/.exec(tag)?.[1];
+        const target = /Target="([^"]+)"/.exec(tag)?.[1];
+        if (id && target) relMap.set(id, target);
+      }
+      for (const m of wbXml.matchAll(/<sheet\b[^>]*\/>/g)) {
+        const tag = m[0];
+        const name = /name="([^"]+)"/.exec(tag)?.[1] ?? "Sheet";
+        const rid = /r:id="([^"]+)"/.exec(tag)?.[1];
+        const rel = rid ? relMap.get(rid) : undefined;
+        if (rel) {
+          const target = rel.startsWith("/") ? rel.slice(1) : `xl/${rel.replace(/^\.?\//, "")}`;
+          sheets.push({ name: this.decodeXmlEntities(name), target });
+        }
+      }
+    }
+
+    if (sheets.length === 0) {
+      const fallback = zip.file(/^xl\/worksheets\/sheet\d+\.xml$/);
+      for (const f of fallback) sheets.push({ name: f.name.split("/").pop() ?? f.name, target: f.name });
+    }
+
+    const out: string[] = [];
+    for (const sh of sheets) {
+      const f = zip.file(sh.target);
+      if (!f) continue;
+      const xml = await f.async("string");
+      out.push(`=== Sheet: ${sh.name} ===`);
+      const rows = xml.match(/<row\b[^>]*>[\s\S]*?<\/row>/g) || [];
+      for (const row of rows) {
+        const cells = row.match(/<c\b[^>]*(?:\/>|>[\s\S]*?<\/c>)/g) || [];
+        const rowOut: string[] = [];
+        let lastIdx = -1;
+        for (const cell of cells) {
+          const ref = /r="([A-Z]+)\d+"/.exec(cell)?.[1];
+          const idx = ref ? this.colLetterToIndex(ref) : lastIdx + 1;
+          while (rowOut.length < idx) rowOut.push("");
+          const t = /t="([^"]+)"/.exec(cell)?.[1] ?? "n";
+          let value = "";
+          if (t === "inlineStr") {
+            const parts = [...cell.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((m) =>
+              this.decodeXmlEntities(m[1])
+            );
+            value = parts.join("");
+          } else {
+            const v = /<v[^>]*>([\s\S]*?)<\/v>/.exec(cell)?.[1];
+            if (v != null) {
+              if (t === "s") {
+                const i = Number(v);
+                value = sharedStrings[i] ?? "";
+              } else if (t === "b") {
+                value = v === "1" ? "TRUE" : "FALSE";
+              } else {
+                value = this.decodeXmlEntities(v);
+              }
+            }
+          }
+          rowOut.push(value);
+          lastIdx = idx;
+        }
+        out.push(rowOut.join("\t").replace(/\t+$/, ""));
+      }
+      out.push("");
+    }
+    return out.join("\n").trim();
+  }
+
+  private async extractPptxText(buf: ArrayBuffer): Promise<string> {
+    const zip = await JSZip.loadAsync(buf);
+    const slideFiles = zip.file(/^ppt\/slides\/slide\d+\.xml$/);
+    slideFiles.sort((a, b) => {
+      const na = Number(/slide(\d+)\.xml$/.exec(a.name)?.[1] ?? 0);
+      const nb = Number(/slide(\d+)\.xml$/.exec(b.name)?.[1] ?? 0);
+      return na - nb;
+    });
+    const out: string[] = [];
+    for (const f of slideFiles) {
+      const xml = await f.async("string");
+      const n = /slide(\d+)\.xml$/.exec(f.name)?.[1] ?? "?";
+      const parts = [...xml.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)].map((m) =>
+        this.decodeXmlEntities(m[1])
+      );
+      out.push(`=== Slide ${n} ===`);
+      out.push(parts.join("\n"));
+      out.push("");
+    }
+    return out.join("\n").trim();
+  }
+
   /**
    * Handle search files tool request
    */
@@ -1569,6 +1704,8 @@ class SharePointServer {
     const pathForExtension = this.pathForExtension(filePath);
     const isDocx = /\.docx$/i.test(pathForExtension);
     const isPdf = /\.pdf$/i.test(pathForExtension);
+    const isXlsx = /\.xlsx$/i.test(pathForExtension);
+    const isPptx = /\.pptx$/i.test(pathForExtension);
 
     try {
       let endpoint: string;
@@ -1638,6 +1775,24 @@ class SharePointServer {
         return {
           content: [{ type: "text", text }],
         };
+      }
+
+      if (isXlsx) {
+        const buf = await response.arrayBuffer();
+        const text = await this.extractXlsxText(buf);
+        if (text.length > MAX_BYTES) {
+          throw new Error(`File content too large to return (${(text.length / 1024).toFixed(0)} KB).`);
+        }
+        return { content: [{ type: "text", text }] };
+      }
+
+      if (isPptx) {
+        const buf = await response.arrayBuffer();
+        const text = await this.extractPptxText(buf);
+        if (text.length > MAX_BYTES) {
+          throw new Error(`File content too large to return (${(text.length / 1024).toFixed(0)} KB).`);
+        }
+        return { content: [{ type: "text", text }] };
       }
 
       const contentType = response.headers.get("content-type") ?? "";
