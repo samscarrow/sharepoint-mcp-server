@@ -21,6 +21,7 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import JSZip from "jszip";
+import { PDFParse } from "pdf-parse";
 
 /**
  * Environment variables required for SharePoint authentication
@@ -310,7 +311,7 @@ class SharePointServer {
         {
           name: "search_files",
           description:
-            "Search for files and documents. scope=tenant searches all SharePoint sites (app auth); scope=me searches your OneDrive (delegated auth).",
+            "Search for files and documents. scope=tenant searches all SharePoint sites (app auth); scope=me searches your OneDrive (delegated auth). Pass a returned webUrl as get_file_content.filePath to read the file.",
           inputSchema: {
             type: "object",
             properties: {
@@ -415,7 +416,7 @@ class SharePointServer {
         {
           name: "get_file_content",
           description:
-            "Get the content of a file. Office documents (.docx, .doc, .pptx, .xlsx) are automatically converted to text. scope=tenant reads from SharePoint; scope=me reads from your OneDrive.",
+            "Get the content of a file. PDFs and Office documents (.docx, .doc, .pptx, .xlsx) are automatically converted to text. scope=tenant reads from SharePoint; scope=me reads from your OneDrive.",
           inputSchema: {
             type: "object",
             properties: {
@@ -425,7 +426,7 @@ class SharePointServer {
               },
               filePath: {
                 type: "string",
-                description: "The path to the file",
+                description: "The drive-relative path to the file, or a full SharePoint/OneDrive webUrl returned by search_files",
               },
               driveId: {
                 type: "string",
@@ -1277,6 +1278,31 @@ class SharePointServer {
     }
   }
 
+  private isHttpUrl(value: string): boolean {
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === "https:" || parsed.protocol === "http:";
+    } catch {
+      return false;
+    }
+  }
+
+  private encodeSharingUrl(webUrl: string): string {
+    return `u!${Buffer.from(webUrl)
+      .toString("base64")
+      .replace(/=+$/g, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")}`;
+  }
+
+  private pathForExtension(filePath: string): string {
+    if (!this.isHttpUrl(filePath)) {
+      return filePath;
+    }
+
+    return new URL(filePath).pathname;
+  }
+
   /**
    * Handle search files tool request
    */
@@ -1540,13 +1566,18 @@ class SharePointServer {
       throw new McpError(ErrorCode.InvalidParams, "filePath parameter must be a string");
     }
 
-    const isDocx = /\.docx$/i.test(filePath);
+    const pathForExtension = this.pathForExtension(filePath);
+    const isDocx = /\.docx$/i.test(pathForExtension);
+    const isPdf = /\.pdf$/i.test(pathForExtension);
 
     try {
       let endpoint: string;
       let token: string;
 
-      if (scope === "me") {
+      if (this.isHttpUrl(filePath)) {
+        endpoint = `/shares/${this.encodeSharingUrl(filePath)}/driveItem/content`;
+        token = scope === "me" ? await this.getUserAccessToken() : await this.getAccessToken();
+      } else if (scope === "me") {
         endpoint = driveId
           ? `/me/drives/${driveId}/root:/${filePath}:/content`
           : `/me/drive/root:/${filePath}:/content`;
@@ -1607,6 +1638,30 @@ class SharePointServer {
         return {
           content: [{ type: "text", text }],
         };
+      }
+
+      const contentType = response.headers.get("content-type") ?? "";
+      if (isPdf || contentType.toLowerCase().includes("application/pdf")) {
+        const pdfBytes = new Uint8Array(await response.arrayBuffer());
+        let parser: PDFParse | undefined;
+        try {
+          parser = new PDFParse({ data: pdfBytes });
+          const result = await parser.getText();
+          const text = result.text.trim();
+          if (!text) {
+            throw new Error(
+              `PDF text extraction returned no text from ${result.total} page(s); the PDF may be scanned/image-only and need OCR.`
+            );
+          }
+          if (text.length > MAX_BYTES) {
+            throw new Error(`File content too large to return (${(text.length / 1024).toFixed(0)} KB).`);
+          }
+          return {
+            content: [{ type: "text", text }],
+          };
+        } finally {
+          await parser?.destroy();
+        }
       }
 
       const content = await response.text();

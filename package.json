@@ -41,7 +41,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "0.6.0",
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.1",
+    "pdf-parse": "^2.4.5"
   },
   "devDependencies": {
     "@types/node": "^20.11.24",
