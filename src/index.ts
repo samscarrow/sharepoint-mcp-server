@@ -384,27 +384,31 @@ class SharePointServer {
         {
           name: "list_drive_items",
           description:
-            "List files and folders. scope=tenant lists from a SharePoint site drive; scope=me lists from your OneDrive.",
+            "List files and folders. scope=tenant lists from a SharePoint site drive; scope=me lists from your OneDrive. A site can have multiple document libraries (drives); when driveId is omitted this uses the site's DEFAULT drive, which may not be the one you want — different libraries can even contain same-named folders. Each response echoes the drive it read. The most reliable way to list a folder is to pass its webUrl (e.g. one returned by search_files) as folderPath — that resolves to the correct library automatically. If a path is not found in the default drive, the error lists the site's other libraries so you can retry with driveId.",
           inputSchema: {
             type: "object",
             properties: {
               siteUrl: {
                 type: "string",
-                description: "The SharePoint site URL (required when scope=tenant)",
+                description: "The SharePoint site URL (required when scope=tenant and folderPath is not a webUrl)",
               },
               driveId: {
                 type: "string",
-                description: "The drive ID (optional, uses default drive if not specified)",
+                description: "The drive ID (optional). Omitted = site default drive. Use list_site_drives to see all libraries.",
               },
               folderPath: {
                 type: "string",
-                description: "Optional folder path to list items from (default: root)",
+                description: "Folder to list: either a path relative to the drive root (e.g. 'Main Data Folders/Sam'), OR a folder webUrl (resolves to the right library regardless of driveId). Omit for the drive root.",
               },
               scope: {
                 type: "string",
                 enum: ["tenant", "me"],
                 description: "Scope: tenant (SharePoint, default) or me (your OneDrive)",
                 default: "tenant",
+              },
+              top: {
+                type: "number",
+                description: "Max items per page (default 200, max 200). Use the returned nextLink for more.",
               },
               nextLink: {
                 type: "string",
@@ -652,8 +656,22 @@ class SharePointServer {
           },
         },
         {
+          name: "list_calendars",
+          description:
+            "List the calendars in the user's mailbox, including calendars shared by other people (requires the Calendars.Read.Shared scope). Returns each calendar's name, id, and owner. Pass a returned id as the calendarId argument to list_calendar_events to read someone else's shared calendar. Pass userEmail to introspect another mailbox's calendars (/users/{userEmail}/calendars) — useful to discover a shared calendar's id and to verify whether your token has full-details access to it.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              userEmail: {
+                type: "string",
+                description: "Optional UPN/email of another mailbox to list calendars for. Requires its calendar be shared to you at full-details level (or shared-mailbox Full Access). Omit to list your own mailbox.",
+              },
+            },
+          },
+        },
+        {
           name: "list_calendar_events",
-          description: "List calendar events from the user's Outlook calendar within a date range.",
+          description: "List calendar events from the user's Outlook calendar within a date range. Pass calendarId (from list_calendars) to read a shared calendar that lives in your own mailbox. To read another person's calendar that they have shared with you (e.g. via Outlook 'Add from directory'), pass their userEmail instead — this targets /users/{userEmail}/calendarView and works under delegated Calendars.Read.Shared.",
           inputSchema: {
             type: "object",
             properties: {
@@ -673,6 +691,10 @@ class SharePointServer {
               calendarId: {
                 type: "string",
                 description: "Optional calendar ID. Omit to use the default calendar.",
+              },
+              userEmail: {
+                type: "string",
+                description: "Optional UPN/email of another user whose calendar has been shared with you. Reads /users/{userEmail}/calendarView. Takes precedence over calendarId.",
               },
               nextLink: {
                 type: "string",
@@ -1133,6 +1155,113 @@ class SharePointServer {
             required: ["itemPath"],
           },
         },
+        {
+          name: "create_share_link",
+          description:
+            "Create a shareable link to a file or folder, for pasting into a message or email. Identify the item by webUrl OR by path (filePath + scope/siteUrl/driveId, same addressing as get_file_content). linkScope defaults to 'organization' (anyone signed in to the tenant); use 'anonymous' for anyone-with-the-link, or 'users' to restrict to people you later invite. Returns the link URL.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              filePath: {
+                type: "string",
+                description: "The item's webUrl, or its path relative to the drive root (e.g. 'Folder/Doc.docx')",
+              },
+              type: {
+                type: "string",
+                enum: ["view", "edit", "embed"],
+                description: "Link permission: view (read-only, default), edit (read-write), or embed (read-only, OneDrive personal only)",
+                default: "view",
+              },
+              linkScope: {
+                type: "string",
+                enum: ["anonymous", "organization", "users"],
+                description: "Who can use the link: organization (signed-in tenant users, default), anonymous (anyone with the link), or users (only people invited to the item)",
+                default: "organization",
+              },
+              password: {
+                type: "string",
+                description: "Optional password to protect the link (anonymous links only, where tenant policy allows)",
+              },
+              expirationDateTime: {
+                type: "string",
+                description: "Optional ISO 8601 expiry, e.g. 2026-06-30T23:59:59Z",
+              },
+              siteUrl: {
+                type: "string",
+                description: "SharePoint site URL (required when addressing by path with scope=tenant; ignored when filePath is a webUrl)",
+              },
+              driveId: {
+                type: "string",
+                description: "Drive ID (optional, uses default drive if omitted)",
+              },
+              scope: {
+                type: "string",
+                enum: ["tenant", "me"],
+                description: "Auth/addressing scope when filePath is a path: tenant (SharePoint, default) or me (OneDrive). Ignored when filePath is a webUrl.",
+                default: "tenant",
+              },
+            },
+            required: ["filePath"],
+          },
+        },
+        {
+          name: "share_file",
+          description:
+            "Share a file or folder with specific people by sending them a sharing invitation (optionally with an email notification). Identify the item by webUrl OR by path (same addressing as get_file_content). Grants each recipient read or write access.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              filePath: {
+                type: "string",
+                description: "The item's webUrl, or its path relative to the drive root (e.g. 'Folder/Doc.docx')",
+              },
+              recipients: {
+                type: "array",
+                items: { type: "string" },
+                description: "Email addresses to share with",
+              },
+              role: {
+                type: "string",
+                enum: ["read", "write"],
+                description: "Access level to grant (default: read)",
+                default: "read",
+              },
+              message: {
+                type: "string",
+                description: "Optional message included in the notification email",
+              },
+              sendNotification: {
+                type: "boolean",
+                description: "Send recipients an email notification (default: true)",
+                default: true,
+              },
+              requireSignIn: {
+                type: "boolean",
+                description: "Require recipients to sign in to access (default: true)",
+                default: true,
+              },
+              expirationDateTime: {
+                type: "string",
+                description: "Optional ISO 8601 expiry for the granted access",
+              },
+              siteUrl: {
+                type: "string",
+                description: "SharePoint site URL (required when addressing by path with scope=tenant; ignored when filePath is a webUrl)",
+              },
+              driveId: {
+                type: "string",
+                description: "Drive ID (optional, uses default drive if omitted)",
+              },
+              scope: {
+                type: "string",
+                enum: ["tenant", "me"],
+                description: "Auth/addressing scope when filePath is a path: tenant (SharePoint, default) or me (OneDrive). Ignored when filePath is a webUrl.",
+                default: "tenant",
+              },
+            },
+            required: ["filePath", "recipients"],
+          },
+        },
       ],
     }));
 
@@ -1171,6 +1300,8 @@ class SharePointServer {
             return await this.handleDeleteEmail(request.params.arguments);
           case "get_email_attachments":
             return await this.handleGetEmailAttachments(request.params.arguments);
+          case "list_calendars":
+            return await this.handleListCalendars(request.params.arguments);
           case "list_calendar_events":
             return await this.handleListCalendarEvents(request.params.arguments);
           case "get_calendar_event":
@@ -1203,6 +1334,10 @@ class SharePointServer {
             return await this.handleDeleteDriveItem(request.params.arguments);
           case "move_rename_drive_item":
             return await this.handleMoveRenameDriveItem(request.params.arguments);
+          case "create_share_link":
+            return await this.handleCreateShareLink(request.params.arguments);
+          case "share_file":
+            return await this.handleShareFile(request.params.arguments);
           default:
             throw new McpError(
               ErrorCode.MethodNotFound,
@@ -1633,9 +1768,10 @@ class SharePointServer {
     const folderPath = args?.folderPath;
     const scope = args?.scope || "tenant";
 
-    const SELECT = "$select=id,name,webUrl,size,lastModifiedDateTime,folder,file";
-    const TOP = "$top=50";
+    const SELECT = "$select=id,name,webUrl,size,lastModifiedDateTime,folder,file,parentReference";
+    const TOP = `$top=${Math.min(Number(args?.top) || 200, 200)}`;
     const nextLinkArg = args?.nextLink;
+    const byUrl = typeof folderPath === "string" && this.isHttpUrl(folderPath);
 
     const projectItem = (item: any) => ({
       name: item.name,
@@ -1647,6 +1783,7 @@ class SharePointServer {
       ...(item.file?.mimeType ? { mimeType: item.file.mimeType } : {}),
     });
 
+    let siteId = "";
     try {
       let response: any;
 
@@ -1654,6 +1791,12 @@ class SharePointServer {
         response = scope === "me"
           ? await this.graphRequestAsUser(nextLinkArg)
           : await this.graphRequest(nextLinkArg);
+      } else if (byUrl) {
+        // (A) Address the folder by its webUrl — resolves to the correct library regardless of driveId.
+        const endpoint = `/shares/${this.encodeSharingUrl(folderPath)}/driveItem/children?${SELECT}&${TOP}`;
+        response = scope === "me"
+          ? await this.graphRequestAsUser(endpoint)
+          : await this.graphRequest(endpoint);
       } else if (scope === "me") {
         const base = driveId ? `/me/drives/${driveId}` : "/me/drive";
         const endpoint = folderPath
@@ -1662,9 +1805,9 @@ class SharePointServer {
         response = await this.graphRequestAsUser(endpoint);
       } else {
         if (typeof siteUrl !== "string") {
-          throw new McpError(ErrorCode.InvalidParams, "siteUrl is required when scope=tenant");
+          throw new McpError(ErrorCode.InvalidParams, "siteUrl is required when scope=tenant (or pass a folder webUrl as folderPath)");
         }
-        const siteId = await this.getSiteIdFromUrl(siteUrl);
+        siteId = await this.getSiteIdFromUrl(siteUrl);
         const base = driveId
           ? `/sites/${siteId}/drives/${driveId}`
           : `/sites/${siteId}/drive`;
@@ -1676,6 +1819,16 @@ class SharePointServer {
 
       const items = (response.value || []).map(projectItem);
       const result: any = { items };
+      // (C) Echo which library/drive was actually read, so the caller can see whether it's the intended one.
+      const resolvedDriveId = response.value?.[0]?.parentReference?.driveId;
+      if (resolvedDriveId || driveId) {
+        const note = byUrl
+          ? "resolved from folder webUrl"
+          : driveId
+            ? undefined
+            : "site default drive (driveId omitted)";
+        result.drive = { driveId: resolvedDriveId || driveId, ...(note ? { note } : {}) };
+      }
       if (response["@odata.nextLink"]) {
         result.nextLink = response["@odata.nextLink"];
       }
@@ -1684,6 +1837,24 @@ class SharePointServer {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
     } catch (error) {
+      // (B) A path miss against the default drive is the common trap on multi-library sites
+      // (the wanted folder lives in another library). Enrich the error with the site's drives.
+      const isNotFound = /\b404\b|itemNotFound/i.test(String(error));
+      if (isNotFound && scope === "tenant" && !driveId && !byUrl && folderPath) {
+        try {
+          if (!siteId && typeof siteUrl === "string") siteId = await this.getSiteIdFromUrl(siteUrl);
+          const drives = await this.graphRequest(`/sites/${siteId}/drives?$select=id,name,driveType`);
+          const libs = (drives.value || []).map((d: any) => ({ name: d.name, driveId: d.id, driveType: d.driveType }));
+          throw new Error(
+            `Path "${folderPath}" was not found in this site's DEFAULT drive. ` +
+            `This site has ${libs.length} document librar${libs.length === 1 ? "y" : "ies"}; the folder may be in another one. ` +
+            `Retry with one of these driveId values (or pass the folder's webUrl as folderPath): ${JSON.stringify(libs)}`
+          );
+        } catch (inner: any) {
+          if (/document librar/.test(String(inner?.message))) throw inner;
+          // fall through to generic error if drive enumeration itself failed
+        }
+      }
       throw new Error(`Failed to list drive items: ${error}`);
     }
   }
@@ -2025,6 +2196,112 @@ class SharePointServer {
       content: [{
         type: "text",
         text: JSON.stringify({ id: updated.id, name: updated.name, webUrl: updated.webUrl }, null, 2),
+      }],
+    };
+  }
+
+  /**
+   * Resolve a driveItem endpoint prefix from either a webUrl or a drive-root path.
+   * Append "/createLink", "/invite", etc. to the returned string.
+   */
+  private async resolveDriveItemEndpoint(args: any): Promise<string> {
+    const { filePath, siteUrl, driveId, scope = "tenant" } = args || {};
+    if (typeof filePath !== "string" || !filePath) {
+      throw new McpError(ErrorCode.InvalidParams, "filePath is required (webUrl or drive-root path)");
+    }
+    if (this.isHttpUrl(filePath)) {
+      return `/shares/${this.encodeSharingUrl(filePath)}/driveItem`;
+    }
+    let siteId = "";
+    if (scope === "tenant") {
+      if (!siteUrl) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "siteUrl is required when addressing by path with scope=tenant (or pass the item's webUrl as filePath)"
+        );
+      }
+      siteId = await this.getSiteIdFromUrl(siteUrl);
+    }
+    return `${this.driveBase(scope, siteId, driveId)}/root:/${filePath}:`;
+  }
+
+  private async handleCreateShareLink(args: any) {
+    const { type = "view", linkScope = "organization", password, expirationDateTime } = args || {};
+
+    const itemEndpoint = await this.resolveDriveItemEndpoint(args);
+    const body: any = { type, scope: linkScope };
+    if (password) body.password = password;
+    if (expirationDateTime) body.expirationDateTime = expirationDateTime;
+
+    const token = await this.getUserAccessToken();
+    const response = await fetch(`https://graph.microsoft.com/v1.0${itemEndpoint}/createLink`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Create share link failed: ${response.status} ${response.statusText} - ${errText}`);
+    }
+
+    const perm = await response.json();
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          link: perm.link?.webUrl,
+          type: perm.link?.type,
+          scope: perm.link?.scope,
+          expirationDateTime: perm.expirationDateTime,
+          hasPassword: perm.hasPassword ?? false,
+        }, null, 2),
+      }],
+    };
+  }
+
+  private async handleShareFile(args: any) {
+    const {
+      recipients, role = "read", message, sendNotification = true,
+      requireSignIn = true, expirationDateTime,
+    } = args || {};
+
+    if (!Array.isArray(recipients) || recipients.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "recipients must be a non-empty array of email addresses");
+    }
+
+    const itemEndpoint = await this.resolveDriveItemEndpoint(args);
+    const body: any = {
+      recipients: recipients.map((email: string) => ({ email })),
+      roles: [role],
+      requireSignIn,
+      sendInvitation: sendNotification,
+    };
+    if (message) body.message = message;
+    if (expirationDateTime) body.expirationDateTime = expirationDateTime;
+
+    const token = await this.getUserAccessToken();
+    const response = await fetch(`https://graph.microsoft.com/v1.0${itemEndpoint}/invite`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Share failed: ${response.status} ${response.statusText} - ${errText}`);
+    }
+
+    const result = await response.json();
+    const granted = (result.value || []).map((p: any) => ({
+      grantedTo: p.grantedToV2?.user?.email ?? p.grantedToIdentitiesV2?.[0]?.user?.email ?? p.invitation?.email,
+      roles: p.roles,
+      link: p.link?.webUrl,
+    }));
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ shared: granted, recipients, role }, null, 2),
       }],
     };
   }
@@ -2511,6 +2788,39 @@ class SharePointServer {
   }
 
   /**
+   * Handle list calendars tool request (delegated /me/ endpoint).
+   * Includes calendars shared into the mailbox by other users (Calendars.Read.Shared).
+   */
+  private async handleListCalendars(args: any) {
+    const userEmail = args?.userEmail;
+    try {
+      // userEmail introspects another mailbox's calendars (/users/{upn}/calendars).
+      // Requires the calendar be shared to the signed-in user at full-details
+      // level (or shared-mailbox Full Access). A 404 here means insufficient
+      // share level, NOT that the mailbox is missing.
+      const root = userEmail ? `/users/${encodeURIComponent(userEmail)}` : "/me";
+      const response = await this.graphRequestAsUser(
+        `${root}/calendars?$select=id,name,owner,canEdit,canShare,isDefaultCalendar&$top=100`
+      );
+      const calendars = (response.value || []).map((c: any) => ({
+        id: c.id,
+        name: c.name,
+        owner: c.owner?.address
+          ? { name: c.owner?.name, email: c.owner?.address }
+          : undefined,
+        canEdit: c.canEdit,
+        isDefault: c.isDefaultCalendar,
+      }));
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({ calendars }, null, 2) }],
+      };
+    } catch (error) {
+      throw new Error(`Failed to list calendars: ${error}`);
+    }
+  }
+
+  /**
    * Handle list calendar events tool request (delegated /me/ endpoint)
    */
   private async handleListCalendarEvents(args: any) {
@@ -2522,6 +2832,7 @@ class SharePointServer {
     const end = args?.end || defaultEnd.toISOString();
     const top = Math.min(args?.top || 50, 100);
     const calendarId = args?.calendarId;
+    const userEmail = args?.userEmail;
     const nextLinkArg = args?.nextLink;
 
     try {
@@ -2529,7 +2840,15 @@ class SharePointServer {
       if (nextLinkArg) {
         endpoint = nextLinkArg;
       } else {
-        const base = calendarId ? `/me/calendars/${calendarId}/events` : `/me/calendarView`;
+        // userEmail reads another person's calendar shared with the signed-in
+        // user (delegated Calendars.Read.Shared). Shared calendars added in
+        // Outlook do NOT appear under /me/calendars, so target /users/{upn}.
+        const root = userEmail ? `/users/${encodeURIComponent(userEmail)}` : "/me";
+        const base = userEmail
+          ? `${root}/calendarView`
+          : calendarId
+            ? `/me/calendars/${calendarId}/events`
+            : `/me/calendarView`;
         endpoint =
           `${base}?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}` +
           `&$top=${top}&$select=id,subject,start,end,location,organizer,attendees,bodyPreview,isAllDay,isCancelled` +
