@@ -566,6 +566,16 @@ class SharePointServer {
                 type: "string",
                 description: "Reply body (HTML supported)",
               },
+              cc: {
+                type: "array",
+                items: { type: "string" },
+                description: "Additional CC recipient email addresses (added on top of the original recipients)",
+              },
+              bcc: {
+                type: "array",
+                items: { type: "string" },
+                description: "BCC recipient email addresses",
+              },
               replyAll: {
                 type: "boolean",
                 description: "Reply to all recipients (default: false)",
@@ -2515,10 +2525,17 @@ class SharePointServer {
     const messageId: string = args?.messageId;
     const comment: string = args?.comment;
     const replyAll: boolean = args?.replyAll || false;
+    const ccRaw = args?.cc;
+    const cc: string[] = typeof ccRaw === "string" ? [ccRaw] : (ccRaw || []);
+    const bccRaw = args?.bcc;
+    const bcc: string[] = typeof bccRaw === "string" ? [bccRaw] : (bccRaw || []);
 
     if (!messageId || !comment) {
       throw new McpError(ErrorCode.InvalidParams, "messageId and comment are required");
     }
+
+    const ccRecipients = cc.map((email) => ({ emailAddress: { address: email } }));
+    const bccRecipients = bcc.map((email) => ({ emailAddress: { address: email } }));
 
     // Check for signature file to decide whether to use createReply (supports attachments)
     const sigFile = path.join(path.dirname(TOKEN_FILE), "signature.png");
@@ -2540,10 +2557,15 @@ class SharePointServer {
         `<img src="cid:${sigCid}" width="484" height="215" style="max-width:780px; display:block">` +
         `</a>`;
 
-      // Update the draft body and add the inline attachment
-      await this.graphRequestAsUser(`/me/messages/${draftId}`, "PATCH", {
+      // Update the draft body (and any added cc/bcc) and the inline attachment.
+      // createReply pre-addresses toRecipients to the original sender; patching
+      // ccRecipients/bccRecipients adds to that without disturbing the To line.
+      const draftPatch: any = {
         body: { contentType: "HTML", content: htmlBody },
-      });
+      };
+      if (ccRecipients.length > 0) draftPatch.ccRecipients = ccRecipients;
+      if (bccRecipients.length > 0) draftPatch.bccRecipients = bccRecipients;
+      await this.graphRequestAsUser(`/me/messages/${draftId}`, "PATCH", draftPatch);
       await this.graphRequestAsUser(`/me/messages/${draftId}/attachments`, "POST", {
         "@odata.type": "#microsoft.graph.fileAttachment",
         name: "signature.png",
@@ -2559,7 +2581,13 @@ class SharePointServer {
         ? `/me/messages/${messageId}/replyAll`
         : `/me/messages/${messageId}/reply`;
 
-      await this.graphRequestAsUser(endpoint, "POST", { comment });
+      const replyPayload: any = { comment };
+      if (ccRecipients.length > 0 || bccRecipients.length > 0) {
+        replyPayload.message = {};
+        if (ccRecipients.length > 0) replyPayload.message.ccRecipients = ccRecipients;
+        if (bccRecipients.length > 0) replyPayload.message.bccRecipients = bccRecipients;
+      }
+      await this.graphRequestAsUser(endpoint, "POST", replyPayload);
     }
 
     return {
