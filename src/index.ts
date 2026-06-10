@@ -24,6 +24,39 @@ import JSZip from "jszip";
 import { PDFParse } from "pdf-parse";
 
 /**
+ * Best-effort MIME type from a file extension, for uploads sourced from disk.
+ * Falls back to application/octet-stream so binary files are never sent as text.
+ */
+const MIME_BY_EXT: Record<string, string> = {
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".doc": "application/msword",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xls": "application/vnd.ms-excel",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain",
+  ".csv": "text/csv",
+  ".md": "text/markdown",
+  ".json": "application/json",
+  ".xml": "application/xml",
+  ".html": "text/html",
+  ".htm": "text/html",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+  ".zip": "application/zip",
+};
+
+function mimeFromExtension(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  return MIME_BY_EXT[ext] || "application/octet-stream";
+}
+
+/**
  * Environment variables required for SharePoint authentication
  */
 const { SHAREPOINT_URL, TENANT_ID, CLIENT_ID, CLIENT_SECRET } = process.env;
@@ -1014,7 +1047,7 @@ class SharePointServer {
         {
           name: "upload_file",
           description:
-            "Upload or overwrite a file in SharePoint or OneDrive. Provide content as plain text (contentEncoding=text) or base64 (contentEncoding=base64).",
+            "Upload or overwrite a file in SharePoint or OneDrive. Provide the source EITHER as localFilePath (server reads the file from disk and infers the MIME type — preferred for binary/large files such as .docx/.pdf/.xlsx) OR as inline content (contentEncoding=text for plain text, base64 for binary). Simple upload supports files up to 250 MB.",
           inputSchema: {
             type: "object",
             properties: {
@@ -1022,20 +1055,23 @@ class SharePointServer {
                 type: "string",
                 description: "Destination path including filename (e.g. Documents/report.txt)",
               },
+              localFilePath: {
+                type: "string",
+                description: "Absolute path to a local source file to upload. When set, content/contentEncoding are ignored and contentType is inferred from the extension unless overridden.",
+              },
               content: {
                 type: "string",
-                description: "File content as UTF-8 text or base64 string",
+                description: "Inline file content as UTF-8 text or base64 string. Required only when localFilePath is omitted.",
               },
               contentEncoding: {
                 type: "string",
                 enum: ["text", "base64"],
-                description: "Encoding of the content field (default: text)",
+                description: "Encoding of the inline content field (default: text). Ignored when localFilePath is set.",
                 default: "text",
               },
               contentType: {
                 type: "string",
-                description: "MIME type (default: text/plain)",
-                default: "text/plain",
+                description: "MIME type. Defaults to text/plain for inline content, or is inferred from the file extension when localFilePath is used.",
               },
               siteUrl: {
                 type: "string",
@@ -1058,7 +1094,7 @@ class SharePointServer {
                 default: "replace",
               },
             },
-            required: ["filePath", "content"],
+            required: ["filePath"],
           },
         },
         {
@@ -2022,17 +2058,32 @@ class SharePointServer {
 
   private async handleUploadFile(args: any) {
     const {
-      filePath, content, contentEncoding = "text", contentType = "text/plain",
+      filePath, localFilePath, content, contentEncoding = "text", contentType,
       siteUrl, driveId, scope = "tenant", conflictBehavior = "replace",
     } = args || {};
 
-    if (!filePath || content === undefined) {
-      throw new McpError(ErrorCode.InvalidParams, "filePath and content are required");
+    if (!filePath) {
+      throw new McpError(ErrorCode.InvalidParams, "filePath (destination) is required");
+    }
+    if (!localFilePath && content === undefined) {
+      throw new McpError(ErrorCode.InvalidParams, "Provide either localFilePath or content");
     }
 
-    const bodyBuffer = contentEncoding === "base64"
-      ? Buffer.from(content, "base64")
-      : Buffer.from(content, "utf-8");
+    let bodyBuffer: Buffer;
+    let effectiveContentType: string;
+    if (localFilePath) {
+      try {
+        bodyBuffer = fs.readFileSync(localFilePath);
+      } catch (err: any) {
+        throw new McpError(ErrorCode.InvalidParams, `Could not read localFilePath '${localFilePath}': ${err?.message || err}`);
+      }
+      effectiveContentType = contentType || mimeFromExtension(localFilePath);
+    } else {
+      bodyBuffer = contentEncoding === "base64"
+        ? Buffer.from(content, "base64")
+        : Buffer.from(content, "utf-8");
+      effectiveContentType = contentType || "text/plain";
+    }
 
     let siteId = "";
     if (scope === "tenant") {
@@ -2051,7 +2102,7 @@ class SharePointServer {
     try {
       response = await fetch(`https://graph.microsoft.com/v1.0${endpoint}`, {
         method: "PUT",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": contentType },
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": effectiveContentType },
         body: bodyBuffer,
         signal: controller.signal,
       });
