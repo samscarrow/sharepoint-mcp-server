@@ -480,6 +480,39 @@ class SharePointServer {
           },
         },
         {
+          name: "download_file",
+          description:
+            "Download a file's RAW bytes to a local path on disk (no text extraction), preserving the exact binary. Use this to round-trip Office files: download_file → edit word/document.xml in place → upload_file with localFilePath. Returns the local path and size. Same addressing as get_file_content (filePath or webUrl + scope/siteUrl/driveId).",
+          inputSchema: {
+            type: "object",
+            properties: {
+              filePath: {
+                type: "string",
+                description: "The drive-relative path to the file, or a full SharePoint/OneDrive webUrl returned by search_files",
+              },
+              localFilePath: {
+                type: "string",
+                description: "Absolute local destination path to write the raw bytes to (e.g. /tmp/contract.docx). Parent directory must exist.",
+              },
+              siteUrl: {
+                type: "string",
+                description: "The SharePoint site URL (required when scope=tenant and filePath is not a webUrl)",
+              },
+              driveId: {
+                type: "string",
+                description: "The drive ID (optional, uses default drive if not specified)",
+              },
+              scope: {
+                type: "string",
+                enum: ["tenant", "me"],
+                description: "Scope: tenant (SharePoint, default) or me (your OneDrive)",
+                default: "tenant",
+              },
+            },
+            required: ["filePath", "localFilePath"],
+          },
+        },
+        {
           name: "list_emails",
           description:
             "List recent emails from your mailbox (delegated auth). Returns subject, from, date, and preview.",
@@ -1326,6 +1359,8 @@ class SharePointServer {
             return await this.handleListDriveItems(request.params.arguments);
           case "get_file_content":
             return await this.handleGetFileContent(request.params.arguments);
+          case "download_file":
+            return await this.handleDownloadFile(request.params.arguments);
           case "list_emails":
             return await this.handleListEmails(request.params.arguments);
           case "get_email":
@@ -1908,6 +1943,93 @@ class SharePointServer {
   /**
    * Handle get file content tool request
    */
+  /**
+   * Resolve the Graph /content endpoint and the right token for a file,
+   * addressed either by webUrl or by drive-relative path under a given scope.
+   */
+  private async resolveContentEndpoint(
+    filePath: string,
+    siteUrl: string | undefined,
+    driveId: string | undefined,
+    scope: string,
+  ): Promise<{ endpoint: string; token: string }> {
+    if (this.isHttpUrl(filePath)) {
+      return {
+        endpoint: `/shares/${this.encodeSharingUrl(filePath)}/driveItem/content`,
+        token: scope === "me" ? await this.getUserAccessToken() : await this.getAccessToken(),
+      };
+    }
+    if (scope === "me") {
+      return {
+        endpoint: driveId
+          ? `/me/drives/${driveId}/root:/${filePath}:/content`
+          : `/me/drive/root:/${filePath}:/content`,
+        token: await this.getUserAccessToken(),
+      };
+    }
+    if (typeof siteUrl !== "string") {
+      throw new McpError(ErrorCode.InvalidParams, "siteUrl is required when scope=tenant");
+    }
+    const siteId = await this.getSiteIdFromUrl(siteUrl);
+    return {
+      endpoint: driveId
+        ? `/sites/${siteId}/drives/${driveId}/root:/${filePath}:/content`
+        : `/sites/${siteId}/drive/root:/${filePath}:/content`,
+      token: await this.getAccessToken(),
+    };
+  }
+
+  private async handleDownloadFile(args: any) {
+    const filePath = args?.filePath;
+    const localFilePath = args?.localFilePath;
+    const driveId = args?.driveId;
+    const siteUrl = args?.siteUrl;
+    const scope = args?.scope || "tenant";
+
+    if (typeof filePath !== "string") {
+      throw new McpError(ErrorCode.InvalidParams, "filePath parameter must be a string");
+    }
+    if (typeof localFilePath !== "string") {
+      throw new McpError(ErrorCode.InvalidParams, "localFilePath parameter must be a string");
+    }
+
+    const { endpoint, token } = await this.resolveContentEndpoint(filePath, siteUrl, driveId, scope);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+
+    let response: Response;
+    try {
+      response = await fetch(`https://graph.microsoft.com/v1.0${endpoint}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+    } catch (err: any) {
+      clearTimeout(timer);
+      if (err?.name === "AbortError") throw new Error(`Download timed out after 30s: ${filePath}`);
+      throw err;
+    }
+    clearTimeout(timer);
+
+    if (!response.ok) {
+      throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+    }
+
+    const buf = Buffer.from(await response.arrayBuffer());
+    try {
+      fs.writeFileSync(localFilePath, buf);
+    } catch (err: any) {
+      throw new McpError(ErrorCode.InvalidParams, `Could not write to localFilePath '${localFilePath}': ${err?.message || err}`);
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ localFilePath, bytes: buf.length }, null, 2),
+      }],
+    };
+  }
+
   private async handleGetFileContent(args: any) {
     const siteUrl = args?.siteUrl;
     const filePath = args?.filePath;
@@ -1925,27 +2047,7 @@ class SharePointServer {
     const isPptx = /\.pptx$/i.test(pathForExtension);
 
     try {
-      let endpoint: string;
-      let token: string;
-
-      if (this.isHttpUrl(filePath)) {
-        endpoint = `/shares/${this.encodeSharingUrl(filePath)}/driveItem/content`;
-        token = scope === "me" ? await this.getUserAccessToken() : await this.getAccessToken();
-      } else if (scope === "me") {
-        endpoint = driveId
-          ? `/me/drives/${driveId}/root:/${filePath}:/content`
-          : `/me/drive/root:/${filePath}:/content`;
-        token = await this.getUserAccessToken();
-      } else {
-        if (typeof siteUrl !== "string") {
-          throw new McpError(ErrorCode.InvalidParams, "siteUrl is required when scope=tenant");
-        }
-        const siteId = await this.getSiteIdFromUrl(siteUrl);
-        endpoint = driveId
-          ? `/sites/${siteId}/drives/${driveId}/root:/${filePath}:/content`
-          : `/sites/${siteId}/drive/root:/${filePath}:/content`;
-        token = await this.getAccessToken();
-      }
+      const { endpoint, token } = await this.resolveContentEndpoint(filePath, siteUrl, driveId, scope);
 
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 20000);
