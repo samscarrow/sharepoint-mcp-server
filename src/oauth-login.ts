@@ -23,6 +23,9 @@ if (!TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
   process.exit(1);
 }
 
+const codeArgIdx = process.argv.indexOf("--code");
+const directCode = codeArgIdx !== -1 ? process.argv[codeArgIdx + 1] : null;
+
 const REDIRECT_URI = "http://localhost:3000/callback";
 const SCOPES = "Mail.ReadWrite Mail.Send Files.Read Files.Read.All Files.ReadWrite Files.ReadWrite.All Sites.ReadWrite.All Calendars.Read Calendars.ReadBasic Calendars.ReadWrite Calendars.Read.Shared ChannelMessage.Send Tasks.ReadWrite offline_access";
 const TOKEN_FILE =
@@ -78,6 +81,12 @@ function saveTokens(data: any): void {
   console.log(`\nTokens saved to ${TOKEN_FILE}`);
 }
 
+if (directCode) {
+  exchangeCode(directCode)
+    .then((tokens) => { saveTokens(tokens); process.exit(0); })
+    .catch((err) => { console.error(err.message); process.exit(1); });
+} else {
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url!, "http://localhost:3000");
 
@@ -125,3 +134,5 @@ server.listen(3000, () => {
     console.log("\nCould not open browser automatically. Open the URL above manually.");
   }
 });
+
+}
