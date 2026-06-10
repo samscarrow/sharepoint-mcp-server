@@ -141,11 +141,32 @@ function parseArgs(argv) {
   return a;
 }
 
+const HELP = `docx-edit — in-place text replacement inside a .docx that preserves formatting.
+
+A .docx is a zip of XML parts. Visible text lives in <w:t> nodes, but Word
+frequently splits one visible phrase across several runs. This script joins the
+text across runs, replaces, then writes the new text back into the FIRST affected
+run and blanks the rest — so styling, tables, headers, numbering, and every
+untouched byte are preserved exactly.
+
+Usage:
+  docx-edit <input.docx> -o <output.docx> -r "Old=>New" [-r ...]
+  docx-edit <input.docx> -o <output.docx> --map repl.json
+  docx-edit <input.docx> --in-place -r "2025=>2026"
+  docx-edit <input.docx> --dry-run -r "Old=>New"
+
+  --map repl.json   JSON: [{"find":"..","replace":"..","all":true}]  or  {"old":"new"}
+  -r "A=>B"         repeatable inline rule (replaces ALL occurrences by default)
+  --first           only replace the first occurrence of each rule
+  --dry-run         report match counts, write nothing
+  --allow-missing   don't exit non-zero when a rule matches 0 times
+  --parts <list>    comma-list of zip parts to edit
+                    (default: word/document.xml,word/header*.xml,word/footer*.xml)
+
+Exit codes: 0 ok · 1 a rule matched nothing (unless --allow-missing) · 2 usage/error.`;
+
 function printHelp() {
-  const header = fs.readFileSync(new URL(import.meta.url), "utf-8")
-    .split("\n").filter((l) => l.startsWith(" *") || l.startsWith("/**"))
-    .map((l) => l.replace(/^\/?\*+ ?/, "")).join("\n");
-  console.log(header);
+  console.log(HELP);
 }
 
 // ---- main ------------------------------------------------------------------

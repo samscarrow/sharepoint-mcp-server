@@ -37,7 +37,8 @@
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",
     "test": "node test/basic-test.js",
-    "oauth-login": "node build/oauth-login.js"
+    "oauth-login": "node build/oauth-login.js",
+    "bundle:docx-edit": "npx --yes esbuild scripts/docx-edit.mjs --bundle --platform=node --format=esm --outfile=scripts/docx-edit.bundle.mjs --legal-comments=none && node -e \"require('fs').chmodSync('scripts/docx-edit.bundle.mjs','755')\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "0.6.0",
