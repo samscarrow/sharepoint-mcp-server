@@ -24,20 +24,22 @@ a known title-request email):
 
 **Changes:**
 
-- **`get_thread`** (highest leverage): given a `messageId` (or `conversationId`, or
-  subject), return every message in the conversation, full bodies, chronological.
-  Impl: read the message's `conversationId`, then
-  `GET /me/messages?$filter=conversationId eq '{id}'&$orderby=receivedDateTime&$select=…,body`.
-- **Expose `conversationId`** in `get_email`, `list_emails`, and `search_emails`
-  output so any found message can pivot to its thread.
-- **Deterministic filters** on `search_emails` (or a new `find_emails`): `from`,
+- [x] **`get_thread`** (highest leverage): given a `messageId` (or `conversationId`),
+  return every message in the conversation, full bodies, chronological. *Shipped* —
+  resolves conversationId from messageId, filters `/me/messages` by conversationId
+  across all folders, sorts client-side (Graph rejects `$filter`+`$orderby` on
+  different properties).
+- [x] **Expose `conversationId`** in `get_email`, `list_emails`, and `search_emails`
+  output so any found message can pivot to its thread. *Shipped.*
+- [x] **Truncation visible (partial)**: `search_emails` now returns `hasMore` + a
+  note that absence isn't proof; `get_thread` flags `hasMore`. *Shipped.*
+- [ ] **Deterministic filters** on `search_emails` (or a new `find_emails`): `from`,
   `to`, `subject`, `after`, `before`, `folder`. When present, use `$filter`
   (complete, date-ordered, paginated) instead of `$search` (ranked, capped) — Graph
-  forbids combining the two, so pick mode by args. Makes "all of X's mail in this
-  window" exhaustive, no keyword guessing.
-- **Make truncation visible**: return `hasMore` (nextLink present) and, where cheap,
-  `@odata.count` (`$count=true` + `ConsistencyLevel: eventual`). Optionally return
-  fuller bodies / a `fullBody` flag.
+  forbids combining the two, so pick mode by args. (`list_emails` already accepts a
+  raw OData filter; this is the friendlier, discoverable version.) *Fast follow.*
+- [ ] **`@odata.count`** on search (`$count=true` + `ConsistencyLevel: eventual`) and
+  optionally fuller bodies / a `fullBody` flag. *Fast follow.*
 
 Behavioral lesson the tools should make easy: retrieve by **thread/sender**, not by
 guessed content; never assert non-existence from a ranked, capped search.

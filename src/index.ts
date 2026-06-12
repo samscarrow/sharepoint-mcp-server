@@ -515,7 +515,7 @@ class SharePointServer {
         {
           name: "list_emails",
           description:
-            "List recent emails from your mailbox (delegated auth). Returns subject, from, date, and preview.",
+            "List recent emails from your mailbox (delegated auth). Returns subject, from, date, preview, and conversationId (pass to get_thread to read the whole thread). Use the OData filter for deterministic, complete retrieval by sender/date (e.g. all mail from one person in a date range) instead of keyword guessing.",
           inputSchema: {
             type: "object",
             properties: {
@@ -544,7 +544,7 @@ class SharePointServer {
         },
         {
           name: "get_email",
-          description: "Get the full content of a specific email by message ID",
+          description: "Get the full content of a specific email by message ID. The result includes conversationId — pass it to get_thread to read the whole thread.",
           inputSchema: {
             type: "object",
             properties: {
@@ -557,8 +557,32 @@ class SharePointServer {
           },
         },
         {
+          name: "get_thread",
+          description:
+            "Read an ENTIRE email conversation (thread) in chronological order, with full message bodies. Provide either a messageId (any message in the thread — its conversationId is resolved automatically) OR a conversationId. Use this instead of search_emails whenever you know which thread the answer is in: it returns every message in the thread, including quoted/down-thread replies that keyword search ranks low and misses. Retrieve by thread, not by guessed keywords.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              messageId: {
+                type: "string",
+                description: "A message ID belonging to the thread. Its conversationId is resolved automatically. Provide this OR conversationId.",
+              },
+              conversationId: {
+                type: "string",
+                description: "The conversationId to fetch directly (from get_email/list_emails/search_emails output). Provide this OR messageId.",
+              },
+              maxMessages: {
+                type: "number",
+                description: "Maximum messages to return (default: 50, max: 100)",
+                default: 50,
+              },
+            },
+          },
+        },
+        {
           name: "search_emails",
-          description: "Search emails by keyword in your mailbox",
+          description:
+            "Search emails by keyword (Microsoft Graph relevance search). NOTE: results are relevance-ranked and capped at `top` — a small result set is NOT proof a message doesn't exist, and text inside quoted/down-thread replies often ranks low. When you know which thread or sender the answer is in, prefer get_thread (read a whole conversation) or list_emails with a sender/date filter. Each result includes conversationId for pivoting to get_thread.",
           inputSchema: {
             type: "object",
             properties: {
@@ -1365,6 +1389,8 @@ class SharePointServer {
             return await this.handleListEmails(request.params.arguments);
           case "get_email":
             return await this.handleGetEmail(request.params.arguments);
+          case "get_thread":
+            return await this.handleGetThread(request.params.arguments);
           case "search_emails":
             return await this.handleSearchEmails(request.params.arguments);
           case "send_email":
@@ -2483,7 +2509,7 @@ class SharePointServer {
       if (nextLinkArg) {
         endpoint = nextLinkArg;
       } else {
-        endpoint = `/me/mailFolders/${folder}/messages?$top=${top}&$select=id,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview&$orderby=receivedDateTime desc`;
+        endpoint = `/me/mailFolders/${folder}/messages?$top=${top}&$select=id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview&$orderby=receivedDateTime desc`;
         if (filter) {
           endpoint += `&$filter=${encodeURIComponent(filter)}`;
         }
@@ -2492,6 +2518,7 @@ class SharePointServer {
       const response = await this.graphRequestAsUser(endpoint);
       const messages = (response.value || []).map((m: any) => ({
         id: m.id,
+        conversationId: m.conversationId,
         subject: m.subject,
         from: m.from?.emailAddress?.address,
         fromName: m.from?.emailAddress?.name,
@@ -2526,7 +2553,7 @@ class SharePointServer {
 
     try {
       const message = await this.graphRequestAsUser(
-        `/me/messages/${messageId}?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments,importance`
+        `/me/messages/${messageId}?$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments,importance`
       );
 
       return {
@@ -2536,6 +2563,7 @@ class SharePointServer {
             text: JSON.stringify(
               {
                 id: message.id,
+                conversationId: message.conversationId,
                 subject: message.subject,
                 from: message.from?.emailAddress,
                 to: message.toRecipients?.map((r: any) => r.emailAddress),
@@ -2558,6 +2586,70 @@ class SharePointServer {
   }
 
   /**
+   * Handle get thread (conversation) request — returns every message in a
+   * conversation, full bodies, chronological. Resolves conversationId from a
+   * messageId when only the latter is given. This is the retrieve-by-thread
+   * path that keyword search cannot replace (quoted/down-thread replies).
+   */
+  private async handleGetThread(args: any) {
+    let conversationId = args?.conversationId;
+    const messageId = args?.messageId;
+    const maxMessages = Math.min(args?.maxMessages || 50, 100);
+
+    if (typeof conversationId !== "string" && typeof messageId !== "string") {
+      throw new McpError(ErrorCode.InvalidParams, "Provide either messageId or conversationId");
+    }
+
+    try {
+      // Resolve conversationId from the message if not supplied directly.
+      if (typeof conversationId !== "string") {
+        const msg = await this.graphRequestAsUser(
+          `/me/messages/${messageId}?$select=conversationId`
+        );
+        conversationId = msg.conversationId;
+        if (!conversationId) {
+          throw new Error("Could not resolve conversationId from the provided messageId");
+        }
+      }
+
+      // Fetch every message in the conversation across all folders. Graph
+      // rejects $filter + $orderby on different properties here, so filter by
+      // conversationId only and sort client-side by receivedDateTime.
+      const endpoint =
+        `/me/messages?$filter=conversationId eq '${encodeURIComponent(conversationId)}'` +
+        `&$top=${maxMessages}` +
+        `&$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments`;
+
+      const response = await this.graphRequestAsUser(endpoint);
+      const messages = (response.value || [])
+        .map((m: any) => ({
+          id: m.id,
+          subject: m.subject,
+          from: m.from?.emailAddress,
+          to: m.toRecipients?.map((r: any) => r.emailAddress),
+          cc: m.ccRecipients?.map((r: any) => r.emailAddress),
+          date: m.receivedDateTime,
+          hasAttachments: m.hasAttachments,
+          body: m.body?.content,
+          bodyType: m.body?.contentType,
+        }))
+        .sort((a: any, b: any) => String(a.date).localeCompare(String(b.date)));
+
+      const result: any = { conversationId, count: messages.length, messages };
+      if (response["@odata.nextLink"]) {
+        result.hasMore = true;
+        result.note = `Thread has more than ${maxMessages} messages; raise maxMessages to fetch the rest.`;
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    } catch (error) {
+      throw new Error(`Failed to get thread: ${error}`);
+    }
+  }
+
+  /**
    * Handle search emails tool request (delegated /me/ endpoint)
    */
   private async handleSearchEmails(args: any) {
@@ -2571,11 +2663,12 @@ class SharePointServer {
 
     try {
       const endpoint = nextLinkArg
-        || `/me/messages?$search="${encodeURIComponent(query)}"&$top=${top}&$select=id,subject,from,receivedDateTime,bodyPreview`;
+        || `/me/messages?$search="${encodeURIComponent(query)}"&$top=${top}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview`;
 
       const response = await this.graphRequestAsUser(endpoint);
       const messages = (response.value || []).map((m: any) => ({
         id: m.id,
+        conversationId: m.conversationId,
         subject: m.subject,
         from: m.from?.emailAddress?.address,
         fromName: m.from?.emailAddress?.name,
@@ -2586,7 +2679,9 @@ class SharePointServer {
       const result: any = { messages };
       if (response["@odata.nextLink"]) {
         result.nextLink = response["@odata.nextLink"];
+        result.hasMore = true;
       }
+      result.note = "Relevance-ranked and capped at top; absence here is not proof a message doesn't exist. To read a full thread, pass a result's conversationId to get_thread.";
 
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
