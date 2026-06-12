@@ -1,0 +1,86 @@
+# Implementation Backlog
+
+Prioritized improvements to the bay-view-graph MCP server. Newest analysis on top.
+
+---
+
+## 1. Email retrieval overhaul (HIGH — root cause of real retrieval failures)
+
+**Problem.** `search_emails` is the only discovery tool and it is Microsoft Graph
+`$search`: relevance-ranked, top-N capped, body-preview-only, and it exposes no
+`conversationId`, no result count, and no sender/date filter
+(`src/index.ts` ~L2574). Consequences observed in a live session (failing to find
+a known title-request email):
+
+- The only discovery strategy is **guessing keywords**. If the target text sits in
+  a quoted/down-thread reply or uses different wording, it never ranks into the
+  capped top-N and is silently missed.
+- **No thread retrieval.** You can read one message (`get_email`) but cannot pull a
+  whole conversation in one step — so "open the thread and read all of it" is
+  impossible, and a known thread gets walked past.
+- **No truncation signal.** Results don't say how many matched, inviting the
+  absence-of-evidence trap ("10 results" read as "only 10 exist").
+- **Preview-only bodies** force N re-fetches to judge relevance.
+
+**Changes:**
+
+- **`get_thread`** (highest leverage): given a `messageId` (or `conversationId`, or
+  subject), return every message in the conversation, full bodies, chronological.
+  Impl: read the message's `conversationId`, then
+  `GET /me/messages?$filter=conversationId eq '{id}'&$orderby=receivedDateTime&$select=…,body`.
+- **Expose `conversationId`** in `get_email`, `list_emails`, and `search_emails`
+  output so any found message can pivot to its thread.
+- **Deterministic filters** on `search_emails` (or a new `find_emails`): `from`,
+  `to`, `subject`, `after`, `before`, `folder`. When present, use `$filter`
+  (complete, date-ordered, paginated) instead of `$search` (ranked, capped) — Graph
+  forbids combining the two, so pick mode by args. Makes "all of X's mail in this
+  window" exhaustive, no keyword guessing.
+- **Make truncation visible**: return `hasMore` (nextLink present) and, where cheap,
+  `@odata.count` (`$count=true` + `ConsistencyLevel: eventual`). Optionally return
+  fuller bodies / a `fullBody` flag.
+
+Behavioral lesson the tools should make easy: retrieve by **thread/sender**, not by
+guessed content; never assert non-existence from a ranked, capped search.
+
+---
+
+## 2. Robust SharePoint URL resolution (MEDIUM-HIGH — fixes a silent-corruption bug)
+
+`get_file_content` / `download_file` detect file type from the URL **path**, but a
+SharePoint `Doc.aspx?…&file=X.docx` viewer link carries the real filename in the
+`file=` query param — so `.docx` isn't detected and it falls through to the
+raw-bytes branch, returning UTF-8-mangled binary instead of extracted text. Sharing
+tokens (`/:w:/r/…`, `IQC…`) are also in play.
+
+**Change:** a `resolveFileIdentity(url)` helper that (1) extracts the real filename
+from `file=` (fallback `sourcedoc`) for extension/MIME detection, (2) normalizes
+viewer / sharing / path URLs to one driveItem, (3) returns the content endpoint and
+correct extension. Have `pathForExtension` and `resolveContentEndpoint` consume it.
+Makes pasting *any* SharePoint link "just work" across get_file_content,
+download_file, share_file, create_share_link.
+
+---
+
+## 3. docx-edit structural modes (MEDIUM — carried from session)
+
+Add to `scripts/docx-edit.mjs`: `--prune-empty-runs` and `--set-section-margin`
+(and consider `--insert-after "<anchor>" "<paragraph>"` for true paragraph
+insertion). Both had to be hand-rolled during a live contract edit.
+
+---
+
+## 4. Upload check-in for check-out-required libraries (LOW — not yet hit)
+
+If a document library enforces "require check-out", a simple `PUT /content` can
+leave the new version as an unpublished draft. Add an auto check-in after
+`upload_file` when that state is detected. Not triggered by current libraries
+(worship library publishes fine), so low priority.
+
+---
+
+## 5. New capabilities (LARGER — net-new reach, optional)
+
+From the assistant-capabilities review: scheduling intelligence
+(`find_meeting_times`, `get_schedule`), people/presence (`search_people`,
+`get_presence`), tasks (Microsoft To Do / Planner — scopes already provisioned),
+and Teams chat/channels. Bigger build; additive rather than fixing a broken path.
