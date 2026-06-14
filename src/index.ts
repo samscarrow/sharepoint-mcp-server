@@ -2122,9 +2122,12 @@ class SharePointServer {
           throw new Error("Not a valid .docx file (missing word/document.xml)");
         }
         const xml = await xmlFile.async("string");
-        // Extract paragraph text: preserve paragraph breaks, strip all XML tags
+        // Extract paragraph text: newline at each paragraph END, then strip all
+        // XML tags. Anchoring on the (attribute-free) </w:p> close tag lets the
+        // general tag-strip remove the full <w:p w:rsidR="…"> open tag too;
+        // anchoring on the open tag instead split it and leaked its attributes.
         const text = xml
-          .replace(/<w:p[ >]/g, "\n<w:p>")
+          .replace(/<\/w:p>/g, "\n")
           .replace(/<[^>]+>/g, "")
           .replace(/\n{3,}/g, "\n\n")
           .trim();
