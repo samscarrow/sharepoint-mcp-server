@@ -33,11 +33,15 @@ a known title-request email):
   output so any found message can pivot to its thread. *Shipped.*
 - [x] **Truncation visible (partial)**: `search_emails` now returns `hasMore` + a
   note that absence isn't proof; `get_thread` flags `hasMore`. *Shipped.*
+- [ ] **`list_emails` $orderby bug (CONFIRMED live):** the handler always appends
+  `$orderby=receivedDateTime desc`, which Graph rejects with `InefficientFilter`
+  whenever a `from/…` (recipient/sender) filter is present — so the deterministic
+  "all of X's mail" path 400s today. Fix: drop `$orderby` when a `$filter` is set
+  and sort client-side (same pattern get_thread uses). Small, high-value.
 - [ ] **Deterministic filters** on `search_emails` (or a new `find_emails`): `from`,
   `to`, `subject`, `after`, `before`, `folder`. When present, use `$filter`
-  (complete, date-ordered, paginated) instead of `$search` (ranked, capped) — Graph
-  forbids combining the two, so pick mode by args. (`list_emails` already accepts a
-  raw OData filter; this is the friendlier, discoverable version.) *Fast follow.*
+  (complete, paginated, sorted client-side per the bug above) instead of `$search`
+  (ranked, capped). Friendlier than raw OData. *Fast follow.*
 - [ ] **`@odata.count`** on search (`$count=true` + `ConsistencyLevel: eventual`) and
   optionally fuller bodies / a `fullBody` flag. *Fast follow.*
 
