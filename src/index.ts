@@ -1542,7 +1542,18 @@ class SharePointServer {
       return filePath;
     }
 
-    return new URL(filePath).pathname;
+    // SharePoint viewer links (…/_layouts/15/Doc.aspx?sourcedoc={GUID}&file=Report.docx&action=…)
+    // carry the real filename in the `file=` query param; the pathname ends in
+    // `Doc.aspx`, so detecting the type from the pathname alone misses .docx/.xlsx/…
+    // and falls through to the raw-bytes branch, returning UTF-8-mangled binary
+    // instead of extracted text. Prefer a query-param filename that actually has
+    // an extension, then fall back to the URL pathname.
+    const url = new URL(filePath);
+    const queryName = url.searchParams.get("file") || url.searchParams.get("sourcedoc");
+    if (queryName && /\.[A-Za-z0-9]+$/.test(queryName)) {
+      return queryName;
+    }
+    return url.pathname;
   }
 
   private decodeXmlEntities(s: string): string {
@@ -2506,12 +2517,20 @@ class SharePointServer {
 
     try {
       let endpoint: string;
+      // Graph rejects $filter + $orderby on different properties here with
+      // InefficientFilter (e.g. any from/toRecipients filter + receivedDateTime
+      // sort). When a $filter is supplied, omit $orderby and sort the page
+      // client-side by receivedDateTime desc — the same approach get_thread
+      // uses. Without a filter, keep the server-side recency sort.
+      const sortClientSide = !!filter && !nextLinkArg;
       if (nextLinkArg) {
         endpoint = nextLinkArg;
       } else {
-        endpoint = `/me/mailFolders/${folder}/messages?$top=${top}&$select=id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview&$orderby=receivedDateTime desc`;
+        endpoint = `/me/mailFolders/${folder}/messages?$top=${top}&$select=id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview`;
         if (filter) {
           endpoint += `&$filter=${encodeURIComponent(filter)}`;
+        } else {
+          endpoint += `&$orderby=receivedDateTime desc`;
         }
       }
 
@@ -2527,6 +2546,11 @@ class SharePointServer {
         isRead: m.isRead,
         preview: m.bodyPreview,
       }));
+      // Best-effort recency order for the filtered path (per page; cross-page
+      // ordering isn't guaranteed without server-side $orderby).
+      if (sortClientSide) {
+        messages.sort((a: any, b: any) => String(b.date).localeCompare(String(a.date)));
+      }
 
       const result: any = { messages };
       if (response["@odata.nextLink"]) {

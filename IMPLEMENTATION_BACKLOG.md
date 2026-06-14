@@ -33,11 +33,12 @@ a known title-request email):
   output so any found message can pivot to its thread. *Shipped.*
 - [x] **Truncation visible (partial)**: `search_emails` now returns `hasMore` + a
   note that absence isn't proof; `get_thread` flags `hasMore`. *Shipped.*
-- [ ] **`list_emails` $orderby bug (CONFIRMED live):** the handler always appends
+- [x] **`list_emails` $orderby bug (CONFIRMED live):** the handler always appended
   `$orderby=receivedDateTime desc`, which Graph rejects with `InefficientFilter`
   whenever a `from/…` (recipient/sender) filter is present — so the deterministic
-  "all of X's mail" path 400s today. Fix: drop `$orderby` when a `$filter` is set
-  and sort client-side (same pattern get_thread uses). Small, high-value.
+  "all of X's mail" path 400'd. *Shipped* — `handleListEmails` now omits `$orderby`
+  when a `$filter` is set and sorts the page client-side by `receivedDateTime desc`
+  (same pattern get_thread uses); keeps server-side sort on the unfiltered path.
 - [ ] **Deterministic filters** on `search_emails` (or a new `find_emails`): `from`,
   `to`, `subject`, `after`, `before`, `folder`. When present, use `$filter`
   (complete, paginated, sorted client-side per the bug above) instead of `$search`
@@ -51,6 +52,15 @@ guessed content; never assert non-existence from a ranked, capped search.
 ---
 
 ## 2. Robust SharePoint URL resolution (MEDIUM-HIGH — fixes a silent-corruption bug)
+
+**Status (partial — core silent-corruption fixed):** `pathForExtension` now extracts
+the real filename from the `file=` (fallback `sourcedoc`) query param when it carries
+an extension, falling back to the URL pathname — so `Doc.aspx?…&file=X.docx` viewer
+links are detected as `.docx`/`.xlsx`/… and parsed to text instead of returning
+mangled bytes. Remaining (smaller follow-up): a shared `resolveFileIdentity(url)` that
+also normalizes viewer/sharing-token URLs to a single driveItem for
+`resolveContentEndpoint` and consolidates the logic across get_file_content,
+download_file, share_file, create_share_link.
 
 `get_file_content` / `download_file` detect file type from the URL **path**, but a
 SharePoint `Doc.aspx?…&file=X.docx` viewer link carries the real filename in the
