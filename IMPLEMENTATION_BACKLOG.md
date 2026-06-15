@@ -39,12 +39,17 @@ a known title-request email):
   "all of X's mail" path 400'd. *Shipped* — `handleListEmails` now omits `$orderby`
   when a `$filter` is set and sorts the page client-side by `receivedDateTime desc`
   (same pattern get_thread uses); keeps server-side sort on the unfiltered path.
-- [ ] **Deterministic filters** on `search_emails` (or a new `find_emails`): `from`,
-  `to`, `subject`, `after`, `before`, `folder`. When present, use `$filter`
-  (complete, paginated, sorted client-side per the bug above) instead of `$search`
-  (ranked, capped). Friendlier than raw OData. *Fast follow.*
-- [ ] **`@odata.count`** on search (`$count=true` + `ConsistencyLevel: eventual`) and
-  optionally fuller bodies / a `fullBody` flag. *Fast follow.*
+- [x] **Deterministic filters** on `search_emails`: `from`, `to`, `after`, `before`,
+  `folder`. When present, uses `$filter` (complete, sorted client-side) instead of
+  `$search` (ranked, capped); modes can't combine, filter wins. *Shipped & verified
+  live* (`from`+date range returns exact match with `mode:"filter"`). Subject still
+  routes through the `query` KQL path (`subject:…`) — `contains(subject,…)` isn't
+  reliably supported in Graph mail `$filter`.
+- [x] **`@odata.count`** on the filter path (`$count=true` + `ConsistencyLevel:
+  eventual`) → exact `total` in the response. *Shipped & verified.* (Not available on
+  the `$search` path — Graph disallows `$count` with `$search` on messages; that path
+  keeps `hasMore` + the not-proof-of-absence note.) Fuller bodies / `fullBody` flag
+  not done — low value given get_thread returns full bodies.
 
 Behavioral lesson the tools should make easy: retrieve by **thread/sender**, not by
 guessed content; never assert non-existence from a ranked, capped search.
