@@ -12,7 +12,11 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
 var __commonJS = (cb, mod) => function __require2() {
-  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  try {
+    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  } catch (e) {
+    throw mod = 0, e;
+  }
 };
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
@@ -9841,8 +9845,70 @@ function replaceInPart(xml, rules) {
   out += xml.slice(cursor);
   return { xml: out, counts, dirtyNodes: total };
 }
+function pruneEmptyRunsInPart(xml) {
+  let removed = 0;
+  const out = xml.replace(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g, (run) => {
+    if (/<w:(t|br|tab|cr|drawing|pict|object|fldChar|instrText|delText|noBreakHyphen|sym|ptab)\b/.test(run)) return run;
+    removed++;
+    return "";
+  });
+  return { xml: out, removed };
+}
+function setMarginInPart(xml, margins, sel) {
+  let changed = 0;
+  const out = xml.replace(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g, (sec) => {
+    if (sel === "continuous" && !/<w:type w:val="continuous"\s*\/>/.test(sec)) return sec;
+    const newSec = sec.replace(/<w:pgMar\b[^>]*\/>/, (pg) => {
+      let p = pg;
+      for (const [k, v] of Object.entries(margins)) {
+        const rx = new RegExp(`(\\bw:${k}=")[^"]*(")`);
+        p = rx.test(p) ? p.replace(rx, `$1${v}$2`) : p.replace(/\s*\/>$/, ` w:${k}="${v}"/>`);
+      }
+      return p;
+    });
+    if (newSec !== sec) changed++;
+    return newSec;
+  });
+  return { xml: out, changed };
+}
+function buildClonedParagraph(target, newText) {
+  let pPr = (target.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/) || [""])[0].replace(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g, "");
+  const firstRun = (target.match(/<w:r\b[\s\S]*?<\/w:r>/) || [""])[0];
+  const rPr = (firstRun.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/) || firstRun.match(/<w:rPr\s*\/>/) || [""])[0];
+  return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${encodeXml(newText)}</w:t></w:r></w:p>`;
+}
+function insertAfterInPart(xml, inserts) {
+  let out = xml;
+  const results = [];
+  for (const ins of inserts) {
+    const paras = out.match(/<w:p\b[\s\S]*?<\/w:p>/g) || [];
+    const target = paras.find(
+      (p) => [...p.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)].map((x) => decodeXml(x[1])).join("").includes(ins.anchor)
+    );
+    if (!target) {
+      results.push({ anchor: ins.anchor, ok: false });
+      continue;
+    }
+    out = out.replace(target, target + buildClonedParagraph(target, ins.text));
+    results.push({ anchor: ins.anchor, ok: true });
+  }
+  return { xml: out, results };
+}
 function parseArgs(argv) {
-  const a = { rules: [], parts: null, out: null, inPlace: false, dryRun: false, allowMissing: false, first: false, input: null };
+  const a = {
+    rules: [],
+    parts: null,
+    out: null,
+    inPlace: false,
+    dryRun: false,
+    allowMissing: false,
+    first: false,
+    input: null,
+    pruneEmptyRuns: false,
+    setMargin: null,
+    marginSection: "all",
+    inserts: []
+  };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
     if (t === "-o" || t === "--out") a.out = argv[++i];
@@ -9851,7 +9917,21 @@ function parseArgs(argv) {
     else if (t === "--allow-missing") a.allowMissing = true;
     else if (t === "--first") a.first = true;
     else if (t === "--parts") a.parts = argv[++i].split(",").map((s) => s.trim()).filter(Boolean);
-    else if (t === "-r" || t === "--replace") {
+    else if (t === "--prune-empty-runs") a.pruneEmptyRuns = true;
+    else if (t === "--margin-section") a.marginSection = argv[++i];
+    else if (t === "--set-margin") {
+      a.setMargin = {};
+      for (const kv of argv[++i].split(",")) {
+        const [k, v] = kv.split("=").map((s) => s.trim());
+        if (!/^(top|bottom|left|right|header|footer|gutter)$/.test(k) || !/^\d+$/.test(v)) {
+          console.error(`Bad --set-margin token "${kv}" (need e.g. top=640,bottom=280)`);
+          process.exit(2);
+        }
+        a.setMargin[k] = v;
+      }
+    } else if (t === "--insert-after") {
+      a.inserts.push({ anchor: argv[++i], text: argv[++i] });
+    } else if (t === "-r" || t === "--replace") {
       const spec = argv[++i];
       const sep = spec.indexOf("=>");
       if (sep === -1) {
@@ -9891,23 +9971,32 @@ Usage:
   --map repl.json   JSON: [{"find":"..","replace":"..","all":true}]  or  {"old":"new"}
   -r "A=>B"         repeatable inline rule (replaces ALL occurrences by default)
   --first           only replace the first occurrence of each rule
-  --dry-run         report match counts, write nothing
-  --allow-missing   don't exit non-zero when a rule matches 0 times
+  --dry-run         report counts, write nothing
+  --allow-missing   don't exit non-zero when a rule/anchor matches 0 times
   --parts <list>    comma-list of zip parts to edit
                     (default: word/document.xml,word/header*.xml,word/footer*.xml)
 
-Exit codes: 0 ok \xB7 1 a rule matched nothing (unless --allow-missing) \xB7 2 usage/error.`;
+Structural ops (combinable with -r):
+  --prune-empty-runs            remove content-less <w:r> shells left by edits
+  --set-margin top=640,bottom=280   set page margins (top/bottom/left/right/header/footer/gutter, twips)
+  --margin-section all|continuous   scope of --set-margin (default all; "continuous"
+                                    targets only continuous-break sections \u2014 the mid-page-gap kind)
+  --insert-after "<anchor>" "<text>"   insert a new paragraph after the one containing
+                                       <anchor>, cloning its style (repeatable)
+
+Exit codes: 0 ok \xB7 1 a rule/anchor matched nothing (unless --allow-missing) \xB7 2 usage/error.`;
 function printHelp() {
   console.log(HELP);
 }
 async function main() {
   const a = parseArgs(process.argv.slice(2));
+  const hasStructural = a.pruneEmptyRuns || a.setMargin || a.inserts.length > 0;
   if (!a.input) {
     console.error("Missing input .docx. Use --help.");
     process.exit(2);
   }
-  if (!a.rules.length) {
-    console.error("No replacement rules. Pass -r or --map.");
+  if (!a.rules.length && !hasStructural) {
+    console.error("Nothing to do. Pass -r/--map, --prune-empty-runs, --set-margin, or --insert-after.");
     process.exit(2);
   }
   if (!a.dryRun && !a.out && !a.inPlace) {
@@ -9921,15 +10010,49 @@ async function main() {
   const wanted = a.parts ? (name) => a.parts.includes(name) : (name) => defaults.some((rx) => rx.test(name));
   const tally = {};
   for (const r of a.rules) tally[r.find] = 0;
-  let editedParts = 0;
+  let editedParts = 0, prunedRuns = 0, marginSections = 0;
+  const insertResults = [];
   for (const name of Object.keys(zip.files)) {
     if (zip.files[name].dir || !wanted(name)) continue;
-    const xml = await zip.files[name].async("string");
-    const { xml: newXml, counts, dirtyNodes } = replaceInPart(xml, a.rules);
-    for (const [k, v] of Object.entries(counts)) tally[k] += v;
-    if (dirtyNodes > 0) {
+    let xml = await zip.files[name].async("string");
+    let changed = false;
+    if (a.rules.length) {
+      const r = replaceInPart(xml, a.rules);
+      for (const [k, v] of Object.entries(r.counts)) tally[k] += v;
+      if (r.dirtyNodes > 0) {
+        xml = r.xml;
+        changed = true;
+      }
+    }
+    if (a.pruneEmptyRuns) {
+      const r = pruneEmptyRunsInPart(xml);
+      if (r.removed > 0) {
+        xml = r.xml;
+        prunedRuns += r.removed;
+        changed = true;
+      }
+    }
+    if (name === "word/document.xml") {
+      if (a.setMargin) {
+        const r = setMarginInPart(xml, a.setMargin, a.marginSection);
+        if (r.changed > 0) {
+          xml = r.xml;
+          marginSections += r.changed;
+          changed = true;
+        }
+      }
+      if (a.inserts.length) {
+        const r = insertAfterInPart(xml, a.inserts);
+        insertResults.push(...r.results);
+        if (r.results.some((x) => x.ok)) {
+          xml = r.xml;
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
       editedParts++;
-      if (!a.dryRun) zip.file(name, newXml);
+      if (!a.dryRun) zip.file(name, xml);
     }
   }
   let missing = false;
@@ -9939,16 +10062,22 @@ async function main() {
     if (c === 0) missing = true;
     console.log(`  ${c === 0 ? "\u2717" : "\u2713"} ${c}\xD7  "${r.find}" \u2192 "${r.replace}"`);
   }
+  if (a.pruneEmptyRuns) console.log(`  pruned empty runs: ${prunedRuns}`);
+  if (a.setMargin) console.log(`  ${marginSections === 0 ? "\u2717" : "\u2713"} margin set on ${marginSections} section(s) [${a.marginSection}] ${JSON.stringify(a.setMargin)}`);
+  for (const ir of insertResults) {
+    if (!ir.ok) missing = true;
+    console.log(`  ${ir.ok ? "\u2713" : "\u2717"} insert-after "${ir.anchor}"${ir.ok ? "" : " (anchor not found)"}`);
+  }
   console.log(`  parts changed: ${editedParts}`);
   if (!a.dryRun && editedParts > 0) {
     const buf = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
     fs.writeFileSync(outPath, buf);
     console.log(`  wrote: ${outPath} (${buf.length} bytes)`);
   } else if (!a.dryRun) {
-    console.log("  nothing to write (no matches).");
+    console.log("  nothing to write (no changes).");
   }
   if (missing && !a.allowMissing) {
-    console.error("One or more rules matched nothing \u2014 check exact text (Word may use curly quotes/non-breaking spaces). Use --dry-run to probe, or --allow-missing to ignore.");
+    console.error("Something matched nothing \u2014 check exact text (Word may use curly quotes/non-breaking spaces) or anchor. Use --dry-run to probe, or --allow-missing to ignore.");
     process.exit(1);
   }
 }
