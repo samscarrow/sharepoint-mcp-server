@@ -7,29 +7,24 @@ work logged at the bottom.
 
 ## Open
 
-### 1. SharePoint URL resolution — consolidation (MEDIUM)
+### 1. SharePoint URL resolution — consolidation (LOW — functionally already works)
 
-Core silent-corruption bug is fixed (`pathForExtension` reads the `file=`/`sourcedoc`
-query param so `Doc.aspx?…&file=X.docx` viewer links extract correctly — see Shipped).
-Remaining: a shared `resolveFileIdentity(url)` helper that also normalizes
-viewer/sharing-token URLs (`/:w:/r/…`, `IQC…`) to a single driveItem for
-`resolveContentEndpoint`, consolidating the logic across `get_file_content`,
-`download_file`, `share_file`, `create_share_link` so pasting *any* SharePoint link
-works uniformly (not just for text extraction).
+Investigated: all four file tools already resolve viewer/sharing/path URLs.
+`get_file_content`/`download_file` go through `resolveContentEndpoint` and
+`share_file`/`create_share_link` through `resolveDriveItemEndpoint`, both routing any
+`http` URL through Graph `/shares/{encoded}/driveItem` — so `Doc.aspx`, `/:w:/r/…`,
+and `IQC…` links already work, and the only real bug (extension detection) is fixed.
+Remaining is a *pure DRY refactor* merging the two resolvers — but they differ in auth
+(content path uses the app token for tenant; item path uses delegated), so merging is
+risk > reward on four working tools. **Defer unless the duplication actually bites.**
 
-### 2. docx-edit structural modes (MEDIUM)
-
-Add to `scripts/docx-edit.mjs`: `--prune-empty-runs` and `--set-section-margin`, and
-consider `--insert-after "<anchor>" "<paragraph>"` for true paragraph insertion. All
-three had to be hand-rolled during a live contract edit.
-
-### 3. Upload check-in for check-out-required libraries (LOW — not yet hit)
+### 2. Upload check-in for check-out-required libraries (LOW — not yet hit)
 
 If a library enforces "require check-out", a simple `PUT /content` can leave the new
 version as an unpublished draft. Auto check-in after `upload_file` when that state is
 detected. Not triggered by current libraries (worship library publishes fine).
 
-### 4. New capabilities (LARGER — net-new reach, optional)
+### 3. New capabilities (LARGER — net-new reach, optional)
 
 From the assistant-capabilities review: scheduling (`find_meeting_times`,
 `get_schedule`), people/presence (`search_people`, `get_presence`), tasks (Microsoft
@@ -62,6 +57,14 @@ open — see Open #1.)
 
 ### .docx text-extraction attribute leak (PR #1)
 Paragraph-tag attributes (`w:rsid…`) no longer bleed into extracted text.
+
+### docx-edit structural modes
+`scripts/docx-edit.mjs` gained `--prune-empty-runs` (drop content-less `<w:r>`
+shells), `--set-margin top=…,bottom=…` with `--margin-section all|continuous` (the
+mid-page-gap fix), and `--insert-after "<anchor>" "<text>"` (clone a paragraph's
+style — pPr + first run's rPr — drop its section break, insert after the anchor).
+Verified on a fixture; bundle regenerated. Replaces the hand-rolled JSZip surgery
+used on the Skylar contract.
 
 ### File round-trip tooling (earlier session)
 `upload_file localFilePath` + MIME inference; `download_file` (raw bytes to disk);
