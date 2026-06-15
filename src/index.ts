@@ -270,7 +270,8 @@ class SharePointServer {
     endpoint: string,
     method: string = "GET",
     body?: any,
-    timeoutMs = 20000
+    timeoutMs = 20000,
+    extraHeaders?: Record<string, string>
   ): Promise<any> {
     const token = await this.getUserAccessToken();
     const url = endpoint.startsWith("https://") ? endpoint : `https://graph.microsoft.com/v1.0${endpoint}`;
@@ -278,6 +279,7 @@ class SharePointServer {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
+      ...(extraHeaders || {}),
     };
 
     const controller = new AbortController();
@@ -582,13 +584,33 @@ class SharePointServer {
         {
           name: "search_emails",
           description:
-            "Search emails by keyword (Microsoft Graph relevance search). NOTE: results are relevance-ranked and capped at `top` — a small result set is NOT proof a message doesn't exist, and text inside quoted/down-thread replies often ranks low. When you know which thread or sender the answer is in, prefer get_thread (read a whole conversation) or list_emails with a sender/date filter. Each result includes conversationId for pivoting to get_thread.",
+            "Find emails two ways. (1) KEYWORD: pass `query` for Microsoft Graph relevance search — ranked and capped at `top`, so a small result set is NOT proof a message doesn't exist (text in quoted/down-thread replies ranks low). (2) DETERMINISTIC: pass any of `from`/`to`/`after`/`before` for a complete, exact filter (not ranked) — use this when you know the sender or date window; returns an exact `total` count. The two modes can't be combined (Graph limitation); if both are given, the filter wins. Every result includes conversationId — pass it to get_thread to read the whole conversation.",
           inputSchema: {
             type: "object",
             properties: {
               query: {
                 type: "string",
-                description: "Search query (searches subject, body, sender, recipients)",
+                description: "Keyword query (relevance search of subject, body, sender, recipients). Supports KQL like 'from:x@y.com' or 'subject:foo'. Omit when using from/to/after/before.",
+              },
+              from: {
+                type: "string",
+                description: "Deterministic filter: sender email address (exact match). Triggers complete filter mode.",
+              },
+              to: {
+                type: "string",
+                description: "Deterministic filter: a recipient email address (exact match). Triggers complete filter mode.",
+              },
+              after: {
+                type: "string",
+                description: "Deterministic filter: only messages received on/after this date or ISO datetime (e.g. 2026-05-25 or 2026-05-25T00:00:00Z).",
+              },
+              before: {
+                type: "string",
+                description: "Deterministic filter: only messages received on/before this date or ISO datetime.",
+              },
+              folder: {
+                type: "string",
+                description: "Restrict to a mail folder (e.g. inbox, sentitems). Default: search across all folders.",
               },
               top: {
                 type: "number",
@@ -600,7 +622,6 @@ class SharePointServer {
                 description: "Pagination cursor — pass the nextLink value from a previous response to fetch the next page",
               },
             },
-            required: ["query"],
           },
         },
         {
@@ -2681,34 +2702,82 @@ class SharePointServer {
    */
   private async handleSearchEmails(args: any) {
     const query = args?.query;
+    const from = args?.from;
+    const to = args?.to;
+    const after = args?.after;
+    const before = args?.before;
+    const folder = args?.folder;
     const top = Math.min(args?.top || 10, 50);
     const nextLinkArg = args?.nextLink;
 
-    if (!nextLinkArg && typeof query !== "string") {
-      throw new McpError(ErrorCode.InvalidParams, "query parameter must be a string");
+    // OData helpers: single-quote escaping and date normalization (YYYY-MM-DD -> full ISO).
+    const q = (v: string) => String(v).replace(/'/g, "''");
+    const dt = (v: string) => (/^\d{4}-\d{2}-\d{2}$/.test(v) ? `${v}T00:00:00Z` : v);
+
+    const filterClauses: string[] = [];
+    if (typeof from === "string" && from) filterClauses.push(`from/emailAddress/address eq '${q(from)}'`);
+    if (typeof to === "string" && to) filterClauses.push(`toRecipients/any(r:r/emailAddress/address eq '${q(to)}')`);
+    if (typeof after === "string" && after) filterClauses.push(`receivedDateTime ge ${dt(after)}`);
+    if (typeof before === "string" && before) filterClauses.push(`receivedDateTime le ${dt(before)}`);
+    const useFilter = filterClauses.length > 0;
+
+    if (!nextLinkArg && !useFilter && typeof query !== "string") {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        "Provide query (keyword search) or at least one filter: from, to, after, before."
+      );
     }
 
     try {
-      const endpoint = nextLinkArg
-        || `/me/messages?$search="${encodeURIComponent(query)}"&$top=${top}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview`;
+      const base = folder ? `/me/mailFolders/${folder}/messages` : "/me/messages";
+      const select = "id,conversationId,subject,from,toRecipients,receivedDateTime,bodyPreview";
+      let endpoint: string;
+      let extraHeaders: Record<string, string> | undefined;
+      const notes: string[] = [];
 
-      const response = await this.graphRequestAsUser(endpoint);
-      const messages = (response.value || []).map((m: any) => ({
+      if (nextLinkArg) {
+        endpoint = nextLinkArg;
+      } else if (useFilter) {
+        // Deterministic, complete retrieval. Graph rejects $filter+$orderby on
+        // different properties (InefficientFilter), so omit $orderby and sort the
+        // page client-side. $count gives the exact total (advanced query → needs
+        // ConsistencyLevel: eventual).
+        const filter = encodeURIComponent(filterClauses.join(" and "));
+        endpoint = `${base}?$filter=${filter}&$top=${top}&$count=true&$select=${select}`;
+        extraHeaders = { ConsistencyLevel: "eventual" };
+        if (typeof query === "string" && query) {
+          notes.push("query (keyword) ignored: Graph can't combine $search with $filter. Run a separate keyword search if needed.");
+        }
+      } else {
+        // Keyword relevance search ($search): ranked, capped, no count/sort.
+        endpoint = `${base}?$search="${encodeURIComponent(query)}"&$top=${top}&$select=${select}`;
+        notes.push("Relevance-ranked and capped at top; absence here is not proof a message doesn't exist. For complete retrieval use from/to/after/before; to read a full thread pass a conversationId to get_thread.");
+      }
+
+      const response = await this.graphRequestAsUser(endpoint, "GET", undefined, 20000, extraHeaders);
+      let messages = (response.value || []).map((m: any) => ({
         id: m.id,
         conversationId: m.conversationId,
         subject: m.subject,
         from: m.from?.emailAddress?.address,
         fromName: m.from?.emailAddress?.name,
+        to: m.toRecipients?.map((r: any) => r.emailAddress?.address),
         date: m.receivedDateTime,
         preview: m.bodyPreview,
       }));
+      // Best-effort recency order for the filtered path (per page).
+      if (useFilter && !nextLinkArg) {
+        messages.sort((a: any, b: any) => String(b.date).localeCompare(String(a.date)));
+      }
 
-      const result: any = { messages };
+      const mode = nextLinkArg ? "page" : useFilter ? "filter" : "search";
+      const result: any = { mode, messages };
+      if (typeof response["@odata.count"] === "number") result.total = response["@odata.count"];
       if (response["@odata.nextLink"]) {
         result.nextLink = response["@odata.nextLink"];
         result.hasMore = true;
       }
-      result.note = "Relevance-ranked and capped at top; absence here is not proof a message doesn't exist. To read a full thread, pass a result's conversationId to get_thread.";
+      if (notes.length) result.note = notes.join(" ");
 
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
