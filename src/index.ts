@@ -664,6 +664,46 @@ class SharePointServer {
           },
         },
         {
+          name: "create_draft",
+          description:
+            "Create a draft email saved in your Drafts folder (delegated auth). Populates recipients and subject so you can open it in Outlook to tweak and send — nothing is sent. Returns the draft id and webLink (open in Outlook). Body is optional; recipients and subject are required.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              to: {
+                type: "array",
+                items: { type: "string" },
+                description: "Recipient email addresses",
+              },
+              subject: {
+                type: "string",
+                description: "Email subject line",
+              },
+              body: {
+                type: "string",
+                description: "Email body (HTML supported). Optional — omit to leave the body empty for you to write.",
+              },
+              cc: {
+                type: "array",
+                items: { type: "string" },
+                description: "CC recipient email addresses",
+              },
+              bcc: {
+                type: "array",
+                items: { type: "string" },
+                description: "BCC recipient email addresses",
+              },
+              bodyType: {
+                type: "string",
+                enum: ["HTML", "Text"],
+                description: "Body content type (default: HTML)",
+                default: "HTML",
+              },
+            },
+            required: ["to", "subject"],
+          },
+        },
+        {
           name: "reply_email",
           description: "Reply to an email by message ID",
           inputSchema: {
@@ -1416,6 +1456,8 @@ class SharePointServer {
             return await this.handleSearchEmails(request.params.arguments);
           case "send_email":
             return await this.handleSendEmail(request.params.arguments);
+          case "create_draft":
+            return await this.handleCreateDraft(request.params.arguments);
           case "reply_email":
             return await this.handleReplyEmail(request.params.arguments);
           case "list_mail_folders":
@@ -2855,6 +2897,84 @@ class SharePointServer {
           text: JSON.stringify({
             success: true,
             message: `Email sent to ${to.join(", ")}`,
+            signatureIncluded: attachments.length > 0,
+          }),
+        },
+      ],
+    };
+  }
+
+  /**
+   * Handle create draft tool request (delegated /me/ endpoint).
+   * Creates an unsent message; POST /me/messages saves it in the Drafts folder
+   * so the user can open it in Outlook to tweak and send.
+   */
+  private async handleCreateDraft(args: any) {
+    const toRaw = args?.to;
+    const to: string[] = typeof toRaw === "string" ? [toRaw] : toRaw;
+    const subject: string = args?.subject;
+    const body: string = args?.body || "";
+    const ccRaw = args?.cc;
+    const cc: string[] = typeof ccRaw === "string" ? [ccRaw] : (ccRaw || []);
+    const bccRaw = args?.bcc;
+    const bcc: string[] = typeof bccRaw === "string" ? [bccRaw] : (bccRaw || []);
+    const bodyType: string = args?.bodyType || "HTML";
+
+    if (!Array.isArray(to) || !to.length || !subject) {
+      throw new McpError(ErrorCode.InvalidParams, "to and subject are required");
+    }
+
+    const toRecipients = to.map((email) => ({ emailAddress: { address: email } }));
+    const ccRecipients = cc.map((email) => ({ emailAddress: { address: email } }));
+    const bccRecipients = bcc.map((email) => ({ emailAddress: { address: email } }));
+
+    // Mirror send_email: if a signature image is saved, append it inline so the
+    // draft already carries the branding the user expects when they hit send.
+    const sigFile = path.join(path.dirname(TOKEN_FILE), "signature.png");
+    const attachments: any[] = [];
+    let finalBody = body;
+
+    if (bodyType === "HTML" && fs.existsSync(sigFile)) {
+      const sigBytes = fs.readFileSync(sigFile).toString("base64");
+      const sigCid = "bay-view-signature";
+      attachments.push({
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        name: "signature.png",
+        contentType: "image/png",
+        contentBytes: sigBytes,
+        isInline: true,
+        contentId: sigCid,
+      });
+      finalBody =
+        body +
+        `<br><br><a href="https://bayviewassociation.org" style="text-decoration:none">` +
+        `<img src="cid:${sigCid}" width="484" height="215" style="max-width:780px; display:block">` +
+        `</a>`;
+    }
+
+    const message: any = {
+      subject,
+      body: { contentType: bodyType, content: finalBody },
+      toRecipients,
+      ccRecipients,
+      bccRecipients,
+    };
+    if (attachments.length > 0) {
+      message.attachments = attachments;
+    }
+
+    const created: any = await this.graphRequestAsUser("/me/messages", "POST", message);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            message: `Draft saved to Drafts for ${to.join(", ")} — open in Outlook to tweak and send`,
+            draftId: created?.id,
+            webLink: created?.webLink,
+            subject: created?.subject ?? subject,
             signatureIncluded: attachments.length > 0,
           }),
         },

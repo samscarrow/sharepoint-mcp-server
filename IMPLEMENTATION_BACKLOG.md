@@ -35,6 +35,13 @@ additive rather than fixing a broken path.
 
 ## Shipped
 
+### create_draft — save an unsent draft to tweak and send
+New `create_draft` tool: builds a message with fully populated recipients
+(`to`/`cc`/`bcc`) and subject (both required; body optional) and POSTs it to
+`/me/messages`, which saves it in the Drafts folder rather than sending. Mirrors
+`send_email` (signature auto-append, recipient coercion) but returns the draft
+`id` and `webLink` so it can be opened in Outlook, edited, and sent manually.
+
 ### Email retrieval overhaul — COMPLETE (PRs #1, #2)
 Root cause: `search_emails` was Graph `$search` only (ranked, capped, preview-only, no
 `conversationId`/count/filters), so a live session failed to find a known email.
