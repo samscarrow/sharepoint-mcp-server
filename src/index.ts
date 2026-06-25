@@ -2756,12 +2756,23 @@ class SharePointServer {
     const q = (v: string) => String(v).replace(/'/g, "''");
     const dt = (v: string) => (/^\d{4}-\d{2}-\d{2}$/.test(v) ? `${v}T00:00:00Z` : v);
 
+    const hasAfter = typeof after === "string" && !!after;
+    const hasBefore = typeof before === "string" && !!before;
+    const useFilter =
+      (typeof from === "string" && !!from) || (typeof to === "string" && !!to) || hasAfter || hasBefore;
+
+    // Graph rule for the messages endpoint: to $orderby a property, that property
+    // must also appear in $filter, and properties present in $orderby must come
+    // BEFORE properties that aren't. We sort receivedDateTime desc for recency, so
+    // its clause must lead. When the caller gives no `after`, inject a floor
+    // (ge 1900) so receivedDateTime is always in $filter. Without the $orderby,
+    // Graph returns filtered messages OLDEST-first, and a capped page silently
+    // hides the most recent matches (the common "did they reply?" miss).
     const filterClauses: string[] = [];
+    filterClauses.push(`receivedDateTime ge ${hasAfter ? dt(after) : "1900-01-01T00:00:00Z"}`);
+    if (hasBefore) filterClauses.push(`receivedDateTime le ${dt(before)}`);
     if (typeof from === "string" && from) filterClauses.push(`from/emailAddress/address eq '${q(from)}'`);
     if (typeof to === "string" && to) filterClauses.push(`toRecipients/any(r:r/emailAddress/address eq '${q(to)}')`);
-    if (typeof after === "string" && after) filterClauses.push(`receivedDateTime ge ${dt(after)}`);
-    if (typeof before === "string" && before) filterClauses.push(`receivedDateTime le ${dt(before)}`);
-    const useFilter = filterClauses.length > 0;
 
     if (!nextLinkArg && !useFilter && typeof query !== "string") {
       throw new McpError(
@@ -2780,12 +2791,14 @@ class SharePointServer {
       if (nextLinkArg) {
         endpoint = nextLinkArg;
       } else if (useFilter) {
-        // Deterministic, complete retrieval. Graph rejects $filter+$orderby on
-        // different properties (InefficientFilter), so omit $orderby and sort the
-        // page client-side. $count gives the exact total (advanced query → needs
-        // ConsistencyLevel: eventual).
+        // Deterministic, complete retrieval, newest-first. $orderby=receivedDateTime
+        // desc is legal here because the filter leads with a receivedDateTime clause
+        // (see filterClauses above) — satisfying Graph's $filter/$orderby ordering
+        // rules and avoiding InefficientFilter. $count gives the exact total
+        // (ConsistencyLevel: eventual).
         const filter = encodeURIComponent(filterClauses.join(" and "));
-        endpoint = `${base}?$filter=${filter}&$top=${top}&$count=true&$select=${select}`;
+        const orderby = encodeURIComponent("receivedDateTime desc");
+        endpoint = `${base}?$filter=${filter}&$orderby=${orderby}&$top=${top}&$count=true&$select=${select}`;
         extraHeaders = { ConsistencyLevel: "eventual" };
         if (typeof query === "string" && query) {
           notes.push("query (keyword) ignored: Graph can't combine $search with $filter. Run a separate keyword search if needed.");
