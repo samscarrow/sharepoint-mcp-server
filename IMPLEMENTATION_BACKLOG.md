@@ -35,6 +35,16 @@ additive rather than fixing a broken path.
 
 ## Shipped
 
+### search_emails deterministic mode oldest-first bug
+Filter mode (`from`/`to`/`after`/`before`) had no `$orderby`, so Graph returned
+filtered `/me/messages` oldest-first; a capped page returned the OLDEST matches and
+the in-page client sort couldn't surface newer mail on later pages — a recent reply
+from a known sender (e.g. `from:anthonyp133@gmail.com`, 45 hits) looked absent.
+Fixed with `$orderby=receivedDateTime desc`, made legal by leading the filter with a
+`receivedDateTime ge …` clause (1900 floor when no `after`), per Graph's
+`$filter`/`$orderby` ordering rule for messages. Newest-first, exact `total`
+preserved, ordered pagination. Verified live.
+
 ### create_draft — save an unsent draft to tweak and send
 New `create_draft` tool: builds a message with fully populated recipients
 (`to`/`cc`/`bcc`) and subject (both required; body optional) and POSTs it to
