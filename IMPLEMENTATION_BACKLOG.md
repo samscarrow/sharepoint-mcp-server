@@ -35,6 +35,24 @@ additive rather than fixing a broken path.
 
 ## Shipped
 
+### reply_email dropped the quoted thread (signature path)
+`reply_email` replies came through with NO quoted history — the recipient saw only
+the new comment + signature, so the thread was effectively "removed" (hit live
+2026-07-07: the `RE: for Sunday` reply to Tony/Jason had no quoted original beneath
+it). Root cause: the signature branch uses `createReply` (needed for the inline
+signature image), which seeds the draft body with the quoted original, but the code
+then PATCHed `body.content` to `comment + signature`, **overwriting** the whole body
+and discarding the quote. The no-signature branch (`POST /reply` with `{comment}`)
+was fine — Graph prepends the comment to the quoted body there — but `signature.png`
+exists for this account, so every reply took the destructive path. Fix: read the
+createReply-seeded body (`draft.body.content`, with a `$select=body` GET fallback)
+and insert the comment + signature *above* the quote via a `<body>`-tag function
+replacer (function form avoids `$` in the comment being read as a replacement
+pattern; falls back to bare prepend if no `<body>`). Verified: transform unit-tested
+against a realistic createReply body — quote preserved, comment/signature land above
+it, `$`/`%` literals survive, body tag not duplicated. Full live send-verification
+needs a redeploy + a real reply (outward mail), so not exercised here.
+
 ### Drafts flagged as unsent in email results
 Unsent drafts were returned inline with sent/received mail by `search_emails`
 (hit live 2026-07-07: a keyword search for "Dorrien" surfaced an unsent "Arrival

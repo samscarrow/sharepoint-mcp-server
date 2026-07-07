@@ -3037,13 +3037,31 @@ class SharePointServer {
       const draft: any = await this.graphRequestAsUser(createEndpoint, "POST", {});
       const draftId: string = draft.id;
 
+      // createReply seeds the draft body with the quoted original thread. Fetch
+      // it so we can prepend our comment ABOVE the quote instead of overwriting
+      // the whole body — overwriting drops the thread history from the sent reply.
+      let quoted: string = draft.body?.content || "";
+      if (!quoted) {
+        const fetched: any = await this.graphRequestAsUser(
+          `/me/messages/${draftId}?$select=body`
+        );
+        quoted = fetched?.body?.content || "";
+      }
+
       const sigBytes = fs.readFileSync(sigFile).toString("base64");
       const sigCid = "bay-view-signature";
-      const htmlBody =
+      const reply =
         comment +
         `<br><br><a href="https://bayviewassociation.org" style="text-decoration:none">` +
         `<img src="cid:${sigCid}" width="484" height="215" style="max-width:780px; display:block">` +
         `</a>`;
+
+      // Insert our comment + signature at the top of the reply body, keeping the
+      // quoted thread beneath it. A function replacer avoids `$` in `reply` being
+      // read as a replacement pattern. Bare prepend if there's no <body> tag.
+      const htmlBody = /<body[^>]*>/i.test(quoted)
+        ? quoted.replace(/<body[^>]*>/i, (m) => m + reply)
+        : reply + quoted;
 
       // Update the draft body (and any added cc/bcc) and the inline attachment.
       // createReply pre-addresses toRecipients to the original sender; patching
