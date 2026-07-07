@@ -2773,7 +2773,17 @@ class SharePointServer {
     const filterClauses: string[] = [];
     filterClauses.push(`receivedDateTime ge ${hasAfter ? dt(after) : "1900-01-01T00:00:00Z"}`);
     if (hasBefore) filterClauses.push(`receivedDateTime le ${dt(before)}`);
-    if (typeof from === "string" && from) filterClauses.push(`from/emailAddress/address eq '${q(from)}'`);
+    // Sender predicate: use startswith, NOT eq. Exchange evaluates `eq` on
+    // from/emailAddress/address against a word-broken content index rather than as
+    // a literal compare, so `eq` silently returns total:0 for whole domains even
+    // when the stored address is byte-identical to the literal (verified live:
+    // every @aol.com sender missed, gmail matched; the value itself is exact).
+    // startswith maps to a reliable prefix restriction that matched every sender
+    // tested — including the ones eq handled — and $count stays accurate (gmail
+    // control: startswith count == eq count == 7). Using the FULL address as the
+    // prefix keeps it effectively exact; a client-side equality post-filter (below)
+    // removes the rare prefix over-match (e.g. x@aol.com vs x@aol.community).
+    if (typeof from === "string" && from) filterClauses.push(`startswith(from/emailAddress/address,'${q(from)}')`);
     if (typeof to === "string" && to) filterClauses.push(`toRecipients/any(r:r/emailAddress/address eq '${q(to)}')`);
 
     if (!nextLinkArg && !useFilter && typeof query !== "string") {
@@ -2827,6 +2837,14 @@ class SharePointServer {
         isDraft: m.isDraft,
         preview: m.bodyPreview,
       }));
+      // The `from` predicate uses startswith(full address) for reliability (see
+      // filterClauses note). Restore exactness by dropping any rare prefix
+      // over-match client-side — a message from x@aol.community must not surface
+      // for from:x@aol.com. Case-insensitive, matching Graph's own eq semantics.
+      if (useFilter && !nextLinkArg && typeof from === "string" && from) {
+        const want = from.toLowerCase();
+        messages = messages.filter((m: any) => String(m.from ?? "").toLowerCase() === want);
+      }
       // Best-effort recency order for the filtered path (per page).
       if (useFilter && !nextLinkArg) {
         messages.sort((a: any, b: any) => String(b.date).localeCompare(String(a.date)));

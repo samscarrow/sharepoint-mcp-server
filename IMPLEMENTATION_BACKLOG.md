@@ -7,7 +7,30 @@ work logged at the bottom.
 
 ## Open
 
-### 1. SharePoint URL resolution — consolidation (LOW — functionally already works)
+### 1. search_emails `to:` filter 400s unconditionally (MEDIUM — hard failure on an advertised deterministic param)
+
+`search_emails { to: <addr> }` throws `400 ErrorInvalidUrlQueryFilter` for **every**
+input (hit live 2026-07-07, confirmed against the running tool). Root cause (verified):
+Exchange does not support lambda operators (`any`/`all`) on the `toRecipients` collection
+via `$filter` on `/me/messages` — **every** shape 400s (bare, +floor, ±`$orderby`,
+±`$count`/`ConsistencyLevel: eventual`, `eq` or `startswith`). The
+`toRecipients/any(r:…eq…)` clause the tool builds (`src/index.ts` ~2786) can therefore
+never succeed; the `to` param has never worked.
+
+Less dangerous than the shipped `from` silent-zero (this is a loud error, not a false
+"no mail" conclusion) — but it's an advertised "deterministic/complete" param that
+hard-fails on first use.
+
+Remedy (verified): recipient filtering only works via KQL `$search` —
+`search_emails { query: "to:<addr>" }` returns correct results **today** (unquoted;
+`to:"<addr>"` 400s). Options, none yet chosen (semantics call): (a) route the `to` param
+internally through the `$search` KQL path — but that silently downgrades it from
+deterministic/exact-count to ranked/capped, a semantics change on an advertised param;
+(b) throw a clear `McpError` pointing callers at `query: "to:<addr>"` instead of leaking
+a raw Graph 400; (c) fold `to`/`from`/date into a full KQL route (KQL received-range
+syntax not yet verified). Interim: use `query: "to:<addr>"`.
+
+### 2. SharePoint URL resolution — consolidation (LOW — functionally already works)
 
 Investigated: all four file tools already resolve viewer/sharing/path URLs.
 `get_file_content`/`download_file` go through `resolveContentEndpoint` and
@@ -18,13 +41,13 @@ Remaining is a *pure DRY refactor* merging the two resolvers — but they differ
 (content path uses the app token for tenant; item path uses delegated), so merging is
 risk > reward on four working tools. **Defer unless the duplication actually bites.**
 
-### 2. Upload check-in for check-out-required libraries (LOW — not yet hit)
+### 3. Upload check-in for check-out-required libraries (LOW — not yet hit)
 
 If a library enforces "require check-out", a simple `PUT /content` can leave the new
 version as an unpublished draft. Auto check-in after `upload_file` when that state is
 detected. Not triggered by current libraries (worship library publishes fine).
 
-### 3. New capabilities (LARGER — net-new reach, optional)
+### 4. New capabilities (LARGER — net-new reach, optional)
 
 From the assistant-capabilities review: scheduling (`find_meeting_times`,
 `get_schedule`), people/presence (`search_people`, `get_presence`), tasks (Microsoft
@@ -34,6 +57,28 @@ additive rather than fixing a broken path.
 ---
 
 ## Shipped
+
+### search_emails `from:` filter silently returned total:0 for whole domains
+`search_emails { from: <addr> }` returned an authoritative-looking `total: 0` for
+entire domains — every `@aol.com` sender missed (hit live 2026-07-07: nearly reported a
+health-sensitive contact's month-old email as "never arrived"), while gmail senders
+worked. Same false-conclusion class as the filter-oldest-first and drafts-look-sent
+bugs, and *invisible*: the deterministic branch carries no "capped ≠ absence" caveat.
+Root cause (verified live — NOT the case-sensitivity the backlog first guessed):
+Exchange evaluates `eq` on `from/emailAddress/address` against a **word-broken content
+index**, not as a literal compare. The stored address was byte-identical to the literal
+(16 chars, exact codepoints) yet `eq` returned 0, while `startswith(…,'eedunbar')`
+returned the messages. Case ruled out — gmail `eq` matched a mixed-case literal
+(`Teresabcrouse@gmail.com`) against a lowercase stored value. `$count` +
+`ConsistencyLevel: eventual` ruled out — bare `eq` with none of them still returned 0.
+The failure correlates with the sender/domain (all three `@aol.com` senders failed
+`eq`, gmail passed). Fix: sender predicate switched from `eq` to
+`startswith(from/emailAddress/address,'<full address>')` — a reliable prefix restriction
+that matched every sender tested — plus a client-side case-insensitive equality
+post-filter to strip the rare prefix over-match (`x@aol.com` vs `x@aol.community`).
+`$count` stays exact (gmail control 7==7; `eedunbar@aol.com` now 20 vs eq's 0,
+`mabdunbar@aol.com` 55). Verified end-to-end against live Graph. Redeploy of the remote
+(mcp.scarrow.net) still needed for claude.ai's copy to pick up the fix.
 
 ### reply_email dropped the quoted thread (signature path)
 `reply_email` replies came through with NO quoted history — the recipient saw only
