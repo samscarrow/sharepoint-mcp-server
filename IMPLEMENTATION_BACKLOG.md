@@ -35,6 +35,18 @@ additive rather than fixing a broken path.
 
 ## Shipped
 
+### Drafts flagged as unsent in email results
+Unsent drafts were returned inline with sent/received mail by `search_emails`
+(hit live 2026-07-07: a keyword search for "Dorrien" surfaced an unsent "Arrival
+time" draft as the top hit, with a populated `to`+`date` and nothing marking it a
+draft — an agent could conclude the mail already went out and silently drop the
+task). Fix: added `isDraft` to `$select` and the returned object on
+`search_emails`, `list_emails`, and `get_email`. `search_emails` also appends a
+note when any result is a draft (`N result(s) are unsent drafts … NOT proof a
+message was sent`), same class as the existing "capped search ≠ proof of absence"
+flagging. Tool descriptions updated to advertise `isDraft`. Parent-folder surfacing
+skipped — `parentFolderId` is opaque and `isDraft` is the actionable signal.
+
 ### search_emails deterministic mode oldest-first bug
 Filter mode (`from`/`to`/`after`/`before`) had no `$orderby`, so Graph returned
 filtered `/me/messages` oldest-first; a capped page returned the OLDEST matches and

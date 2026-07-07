@@ -517,7 +517,7 @@ class SharePointServer {
         {
           name: "list_emails",
           description:
-            "List recent emails from your mailbox (delegated auth). Returns subject, from, date, preview, and conversationId (pass to get_thread to read the whole thread). Use the OData filter for deterministic, complete retrieval by sender/date (e.g. all mail from one person in a date range) instead of keyword guessing.",
+            "List recent emails from your mailbox (delegated auth). Returns subject, from, date, preview, conversationId (pass to get_thread to read the whole thread), and isDraft (true = unsent draft, not proof anything was sent). Use the OData filter for deterministic, complete retrieval by sender/date (e.g. all mail from one person in a date range) instead of keyword guessing.",
           inputSchema: {
             type: "object",
             properties: {
@@ -546,7 +546,7 @@ class SharePointServer {
         },
         {
           name: "get_email",
-          description: "Get the full content of a specific email by message ID. The result includes conversationId — pass it to get_thread to read the whole thread.",
+          description: "Get the full content of a specific email by message ID. The result includes conversationId — pass it to get_thread to read the whole thread — and isDraft (true = an unsent draft, not a sent/received message).",
           inputSchema: {
             type: "object",
             properties: {
@@ -584,7 +584,7 @@ class SharePointServer {
         {
           name: "search_emails",
           description:
-            "Find emails two ways. (1) KEYWORD: pass `query` for Microsoft Graph relevance search — ranked and capped at `top`, so a small result set is NOT proof a message doesn't exist (text in quoted/down-thread replies ranks low). (2) DETERMINISTIC: pass any of `from`/`to`/`after`/`before` for a complete, exact filter (not ranked) — use this when you know the sender or date window; returns an exact `total` count. The two modes can't be combined (Graph limitation); if both are given, the filter wins. Every result includes conversationId — pass it to get_thread to read the whole conversation.",
+            "Find emails two ways. (1) KEYWORD: pass `query` for Microsoft Graph relevance search — ranked and capped at `top`, so a small result set is NOT proof a message doesn't exist (text in quoted/down-thread replies ranks low). (2) DETERMINISTIC: pass any of `from`/`to`/`after`/`before` for a complete, exact filter (not ranked) — use this when you know the sender or date window; returns an exact `total` count. The two modes can't be combined (Graph limitation); if both are given, the filter wins. Every result includes conversationId — pass it to get_thread to read the whole conversation — and isDraft: results can include unsent drafts (isDraft: true), which are NOT proof a message was sent.",
           inputSchema: {
             type: "object",
             properties: {
@@ -2592,7 +2592,7 @@ class SharePointServer {
       if (nextLinkArg) {
         endpoint = nextLinkArg;
       } else {
-        endpoint = `/me/mailFolders/${folder}/messages?$top=${top}&$select=id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview`;
+        endpoint = `/me/mailFolders/${folder}/messages?$top=${top}&$select=id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,isDraft,bodyPreview`;
         if (filter) {
           endpoint += `&$filter=${encodeURIComponent(filter)}`;
         } else {
@@ -2610,6 +2610,7 @@ class SharePointServer {
         to: m.toRecipients?.map((r: any) => r.emailAddress?.address),
         date: m.receivedDateTime,
         isRead: m.isRead,
+        isDraft: m.isDraft,
         preview: m.bodyPreview,
       }));
       // Best-effort recency order for the filtered path (per page; cross-page
@@ -2643,7 +2644,7 @@ class SharePointServer {
 
     try {
       const message = await this.graphRequestAsUser(
-        `/me/messages/${messageId}?$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments,importance`
+        `/me/messages/${messageId}?$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,body,hasAttachments,importance,isDraft`
       );
 
       return {
@@ -2659,6 +2660,7 @@ class SharePointServer {
                 to: message.toRecipients?.map((r: any) => r.emailAddress),
                 cc: message.ccRecipients?.map((r: any) => r.emailAddress),
                 date: message.receivedDateTime,
+                isDraft: message.isDraft,
                 hasAttachments: message.hasAttachments,
                 importance: message.importance,
                 body: message.body?.content,
@@ -2783,7 +2785,7 @@ class SharePointServer {
 
     try {
       const base = folder ? `/me/mailFolders/${folder}/messages` : "/me/messages";
-      const select = "id,conversationId,subject,from,toRecipients,receivedDateTime,bodyPreview";
+      const select = "id,conversationId,subject,from,toRecipients,receivedDateTime,bodyPreview,isDraft";
       let endpoint: string;
       let extraHeaders: Record<string, string> | undefined;
       const notes: string[] = [];
@@ -2818,11 +2820,20 @@ class SharePointServer {
         fromName: m.from?.emailAddress?.name,
         to: m.toRecipients?.map((r: any) => r.emailAddress?.address),
         date: m.receivedDateTime,
+        // Unsent drafts are returned inline with sent/received mail (they carry a
+        // populated to/date and match keyword/filter queries). Surface isDraft so a
+        // draft is never mistaken for a message that already went out — the
+        // silent-task-drop gotcha behind "corroborate before claiming mail was sent".
+        isDraft: m.isDraft,
         preview: m.bodyPreview,
       }));
       // Best-effort recency order for the filtered path (per page).
       if (useFilter && !nextLinkArg) {
         messages.sort((a: any, b: any) => String(b.date).localeCompare(String(a.date)));
+      }
+      const draftCount = messages.filter((m: any) => m.isDraft).length;
+      if (draftCount > 0) {
+        notes.push(`${draftCount} result(s) are unsent drafts (isDraft: true) — NOT proof a message was sent. Confirm delivery via Sent Items before assuming it went out.`);
       }
 
       const mode = nextLinkArg ? "page" : useFilter ? "filter" : "search";
