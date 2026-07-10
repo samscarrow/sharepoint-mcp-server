@@ -10,6 +10,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -20,6 +21,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import JSZip from "jszip";
 import { PDFParse } from "pdf-parse";
 
@@ -73,6 +75,14 @@ const TOKEN_FILE =
 
 const DELEGATED_SCOPES = "Mail.ReadWrite Mail.Send Files.Read Files.Read.All Files.ReadWrite Files.ReadWrite.All Sites.ReadWrite.All Calendars.Read Calendars.ReadBasic Calendars.ReadWrite Calendars.Read.Shared ChannelMessage.Send Tasks.ReadWrite offline_access";
 
+// Token caches live at module scope, not on the instance. The HTTP transport builds a
+// fresh Server per request (stateless mode), and per-instance caches would mean a Graph
+// token round-trip on every single request.
+let accessToken: string | null = null;
+let tokenExpiry: number = 0;
+let userAccessToken: string | null = null;
+let userTokenExpiry: number = 0;
+
 /**
  * Interface for Microsoft Graph API responses
  */
@@ -85,12 +95,8 @@ interface GraphResponse {
  * SharePoint MCP Server implementation
  * Provides tools and resources for interacting with Microsoft SharePoint via Microsoft Graph API
  */
-class SharePointServer {
+export class SharePointServer {
   private server: Server;
-  private accessToken: string | null = null;
-  private tokenExpiry: number = 0;
-  private userAccessToken: string | null = null;
-  private userTokenExpiry: number = 0;
 
   constructor() {
     this.server = new Server(
@@ -114,8 +120,8 @@ class SharePointServer {
    * Get access token for Microsoft Graph API
    */
   private async getAccessToken(): Promise<string> {
-    if (this.accessToken && Date.now() < this.tokenExpiry) {
-      return this.accessToken;
+    if (accessToken && Date.now() < tokenExpiry) {
+      return accessToken;
     }
 
     const tenantId = TENANT_ID!;
@@ -144,10 +150,10 @@ class SharePointServer {
       }
 
       const data = await response.json();
-      this.accessToken = data.access_token;
-      this.tokenExpiry = Date.now() + (data.expires_in * 1000) - 60000; // Refresh 1 minute early
+      accessToken = data.access_token;
+      tokenExpiry = Date.now() + (data.expires_in * 1000) - 60000; // Refresh 1 minute early
 
-      return this.accessToken!;
+      return accessToken!;
     } catch (error) {
       throw new Error(`Failed to get access token: ${error}`);
     }
@@ -202,8 +208,8 @@ class SharePointServer {
    * Reads refresh token from disk and refreshes as needed.
    */
   private async getUserAccessToken(): Promise<string> {
-    if (this.userAccessToken && Date.now() < this.userTokenExpiry) {
-      return this.userAccessToken;
+    if (userAccessToken && Date.now() < userTokenExpiry) {
+      return userAccessToken;
     }
 
     if (!fs.existsSync(TOKEN_FILE)) {
@@ -216,9 +222,9 @@ class SharePointServer {
 
     // Use cached access token if still valid
     if (tokens.access_token && Date.now() < tokens.expires_at) {
-      this.userAccessToken = tokens.access_token;
-      this.userTokenExpiry = tokens.expires_at;
-      return this.userAccessToken!;
+      userAccessToken = tokens.access_token;
+      userTokenExpiry = tokens.expires_at;
+      return userAccessToken!;
     }
 
     // Refresh
@@ -258,9 +264,9 @@ class SharePointServer {
     };
     fs.writeFileSync(TOKEN_FILE, JSON.stringify(updated, null, 2), { mode: 0o600 });
 
-    this.userAccessToken = data.access_token;
-    this.userTokenExpiry = updated.expires_at;
-    return this.userAccessToken!;
+    userAccessToken = data.access_token;
+    userTokenExpiry = updated.expires_at;
+    return userAccessToken!;
   }
 
   /**
@@ -322,11 +328,10 @@ class SharePointServer {
    */
   private setupErrorHandling(): void {
     this.server.onerror = (error) => console.error("[MCP Error]", error);
-    
-    process.on("SIGINT", async () => {
-      await this.server.close();
-      process.exit(0);
-    });
+    // NOTE: no process-level signal handlers here. Under the HTTP transport a
+    // SharePointServer is constructed per request, and a `process.on("SIGINT")` closure
+    // would capture `this.server` and retain it for the life of the process. Signal
+    // handling belongs to the entry point (see the bootstrap below, and http.ts).
   }
 
   /**
@@ -3850,7 +3855,22 @@ class SharePointServer {
   }
 
   /**
-   * Start the MCP server
+   * Attach this server to any MCP transport (stdio, Streamable HTTP, ...).
+   */
+  async connect(transport: Transport): Promise<void> {
+    await this.server.connect(transport);
+  }
+
+  /**
+   * Close the underlying MCP server. Callers using a per-request instance must call
+   * this when the request ends, or the instance leaks.
+   */
+  async close(): Promise<void> {
+    await this.server.close();
+  }
+
+  /**
+   * Start the MCP server on stdio.
    */
   async run(): Promise<void> {
     const transport = new StdioServerTransport();
@@ -3860,10 +3880,26 @@ class SharePointServer {
 }
 
 /**
- * Main entry point
+ * Main entry point — only when this module is executed directly. Importing it (e.g. from
+ * http.ts) must not start a stdio server.
  */
-const server = new SharePointServer();
-server.run().catch((error) => {
-  console.error("Failed to start SharePoint MCP server:", error);
-  process.exit(1);
-});
+const isEntrypoint =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  const server = new SharePointServer();
+
+  // Registered once, for the process — not per Server instance.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, async () => {
+      await server.close();
+      process.exit(0);
+    });
+  }
+
+  server.run().catch((error) => {
+    console.error("Failed to start SharePoint MCP server:", error);
+    process.exit(1);
+  });
+}
