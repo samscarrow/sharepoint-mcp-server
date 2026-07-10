@@ -798,7 +798,7 @@ class SharePointServer {
         {
           name: "get_email_attachments",
           description:
-            "List attachments on an email, including inline images. Returns name, contentType, isInline, contentId, and base64 contentBytes.",
+            "List attachments on an email, including inline images. Returns metadata only — id, name, contentType, size, isInline, contentId — and deliberately NOT the bytes, since one attachment can be hundreds of KB of base64. To retrieve content, pass an id from this list to save_email_attachment.",
           inputSchema: {
             type: "object",
             properties: {
@@ -814,6 +814,30 @@ class SharePointServer {
               },
             },
             required: ["messageId"],
+          },
+        },
+        {
+          name: "save_email_attachment",
+          description:
+            "Save one email attachment's RAW bytes to a local path on disk, preserving the exact binary. Call get_email_attachments first to get the attachment id. Returns the local path and size. Same shape as download_file: the parent directory must exist.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              messageId: {
+                type: "string",
+                description: "The message ID (from list_emails / search_emails)",
+              },
+              attachmentId: {
+                type: "string",
+                description: "The attachment id, as returned by get_email_attachments",
+              },
+              localFilePath: {
+                type: "string",
+                description:
+                  "Absolute local destination path to write the raw bytes to (e.g. /tmp/score.pdf). Parent directory must exist.",
+              },
+            },
+            required: ["messageId", "attachmentId", "localFilePath"],
           },
         },
         {
@@ -1470,6 +1494,8 @@ class SharePointServer {
             return await this.handleDeleteEmail(request.params.arguments);
           case "get_email_attachments":
             return await this.handleGetEmailAttachments(request.params.arguments);
+          case "save_email_attachment":
+            return await this.handleSaveEmailAttachment(request.params.arguments);
           case "list_calendars":
             return await this.handleListCalendars(request.params.arguments);
           case "list_calendar_events":
@@ -3337,6 +3363,74 @@ class SharePointServer {
     } catch (error) {
       throw new Error(`Failed to get email attachments: ${error}`);
     }
+  }
+
+  /**
+   * Save one attachment's raw bytes to disk.
+   *
+   * get_email_attachments deliberately strips contentBytes — a single PDF can be
+   * hundreds of KB of base64, which is not something to route through a tool result.
+   * This is the companion that actually retrieves content, in the same shape as
+   * download_file: write to localFilePath, return the path and size.
+   */
+  private async handleSaveEmailAttachment(args: any) {
+    const messageId: string = args?.messageId;
+    const attachmentId: string = args?.attachmentId;
+    const localFilePath: string = args?.localFilePath;
+
+    if (typeof messageId !== "string" || !messageId) {
+      throw new McpError(ErrorCode.InvalidParams, "messageId is required");
+    }
+    if (typeof attachmentId !== "string" || !attachmentId) {
+      throw new McpError(ErrorCode.InvalidParams, "attachmentId is required (see get_email_attachments)");
+    }
+    if (typeof localFilePath !== "string" || !localFilePath) {
+      throw new McpError(ErrorCode.InvalidParams, "localFilePath must be an absolute local path");
+    }
+
+    const attachment = await this.graphRequestAsUser(
+      `/me/messages/${messageId}/attachments/${attachmentId}`
+    );
+
+    // Only fileAttachment carries inline bytes. itemAttachment (an embedded message)
+    // and referenceAttachment (a link) have no contentBytes and must not be guessed at.
+    const odataType: string = attachment?.["@odata.type"] ?? "";
+    if (typeof attachment?.contentBytes !== "string") {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `Attachment '${attachment?.name ?? attachmentId}' has no retrievable bytes` +
+          (odataType ? ` (type ${odataType})` : "") +
+          ". Only file attachments can be saved."
+      );
+    }
+
+    const buf = Buffer.from(attachment.contentBytes, "base64");
+    try {
+      fs.writeFileSync(localFilePath, buf);
+    } catch (err: any) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `Could not write to localFilePath '${localFilePath}': ${err?.message || err}`
+      );
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              localFilePath,
+              bytes: buf.length,
+              name: attachment.name,
+              contentType: attachment.contentType,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
   }
 
   /**
