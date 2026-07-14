@@ -71,7 +71,7 @@ const TOKEN_FILE =
   process.env.TOKEN_FILE ||
   path.join(process.env.HOME || "/tmp", ".config", "bay-view-graph", "tokens.json");
 
-const DELEGATED_SCOPES = "Mail.ReadWrite Mail.Send Files.Read Files.Read.All Files.ReadWrite Files.ReadWrite.All Sites.ReadWrite.All Calendars.Read Calendars.ReadBasic Calendars.ReadWrite Calendars.Read.Shared ChannelMessage.Send Tasks.ReadWrite offline_access";
+const DELEGATED_SCOPES = "Mail.ReadWrite Mail.Send Files.Read Files.Read.All Files.ReadWrite Files.ReadWrite.All Sites.ReadWrite.All Sites.Manage.All User.ReadBasic.All Calendars.Read Calendars.ReadBasic Calendars.ReadWrite Calendars.Read.Shared ChannelMessage.Send Tasks.ReadWrite offline_access";
 
 /**
  * Interface for Microsoft Graph API responses
