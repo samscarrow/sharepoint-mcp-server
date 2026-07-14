@@ -1075,7 +1075,11 @@ class SharePointServer {
               },
               filter: {
                 type: "string",
-                description: "Optional OData $filter expression on field values",
+                description: "Optional OData $filter expression on field values (e.g. fields/Status eq 'New'). Filtered columns should be indexed; non-indexed filters are attempted best-effort.",
+              },
+              orderby: {
+                type: "string",
+                description: "Optional OData $orderby expression (e.g. fields/Created desc)",
               },
               select: {
                 type: "string",
@@ -1184,6 +1188,198 @@ class SharePointServer {
               },
             },
             required: ["siteUrl", "listId", "itemId"],
+          },
+        },
+        {
+          name: "create_list",
+          description:
+            "Create a new SharePoint list, optionally with columns. Column types: text, note (multiline), choice, number, boolean, dateTime, person, hyperlink, currency, lookup. Note: multi-select choice columns are not supported by Graph v1.0 — create those in the SharePoint UI.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              siteUrl: {
+                type: "string",
+                description: "SharePoint site URL",
+              },
+              displayName: {
+                type: "string",
+                description: "Display name of the new list",
+              },
+              description: {
+                type: "string",
+                description: "Optional list description",
+              },
+              template: {
+                type: "string",
+                description: "List template (default: genericList)",
+                default: "genericList",
+              },
+              columns: {
+                type: "array",
+                description:
+                  "Optional columns to create with the list. Each: {name, type, displayName?, description?, required?, indexed?, enforceUniqueValues?, defaultValue?, choices? (for choice), dateOnly? (for dateTime), allowMultiple? (person/lookup), lookupListId?/lookupColumnName? (for lookup), definition? (raw Graph columnDefinition passthrough, overrides everything else)}",
+                items: { type: "object" },
+              },
+            },
+            required: ["siteUrl", "displayName"],
+          },
+        },
+        {
+          name: "get_list_columns",
+          description:
+            "Get the column definitions of a SharePoint list, including internal names (use internal names, not display names, in item fields and $filter expressions).",
+          inputSchema: {
+            type: "object",
+            properties: {
+              siteUrl: {
+                type: "string",
+                description: "SharePoint site URL",
+              },
+              listId: {
+                type: "string",
+                description: "List ID or name",
+              },
+              includeHidden: {
+                type: "boolean",
+                description: "Include hidden/read-only system columns (default: false)",
+                default: false,
+              },
+            },
+            required: ["siteUrl", "listId"],
+          },
+        },
+        {
+          name: "create_list_column",
+          description:
+            "Add a column to an existing SharePoint list. Same column spec as create_list. Set indexed: true on columns you plan to $filter on.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              siteUrl: {
+                type: "string",
+                description: "SharePoint site URL",
+              },
+              listId: {
+                type: "string",
+                description: "List ID or name",
+              },
+              column: {
+                type: "object",
+                description:
+                  "Column spec: {name, type, displayName?, description?, required?, indexed?, enforceUniqueValues?, defaultValue?, choices?, dateOnly?, allowMultiple?, lookupListId?, lookupColumnName?, definition?}",
+              },
+            },
+            required: ["siteUrl", "listId", "column"],
+          },
+        },
+        {
+          name: "update_list_column",
+          description:
+            "Update a column definition on a SharePoint list (e.g. change displayName, description, required, or choice values). Pass only the properties to change, as a raw Graph columnDefinition patch.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              siteUrl: {
+                type: "string",
+                description: "SharePoint site URL",
+              },
+              listId: {
+                type: "string",
+                description: "List ID or name",
+              },
+              columnId: {
+                type: "string",
+                description: "Column ID (from get_list_columns) or internal name",
+              },
+              patch: {
+                type: "object",
+                description: "Graph columnDefinition properties to update (e.g. {displayName: 'New Name', choice: {choices: ['A','B']}})",
+              },
+            },
+            required: ["siteUrl", "listId", "columnId", "patch"],
+          },
+        },
+        {
+          name: "delete_list_column",
+          description: "Delete a column from a SharePoint list.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              siteUrl: {
+                type: "string",
+                description: "SharePoint site URL",
+              },
+              listId: {
+                type: "string",
+                description: "List ID or name",
+              },
+              columnId: {
+                type: "string",
+                description: "Column ID (from get_list_columns) or internal name",
+              },
+            },
+            required: ["siteUrl", "listId", "columnId"],
+          },
+        },
+        {
+          name: "delete_list",
+          description: "Delete an entire SharePoint list and all its items. Irreversible via API (goes to site recycle bin).",
+          inputSchema: {
+            type: "object",
+            properties: {
+              siteUrl: {
+                type: "string",
+                description: "SharePoint site URL",
+              },
+              listId: {
+                type: "string",
+                description: "List ID or name",
+              },
+            },
+            required: ["siteUrl", "listId"],
+          },
+        },
+        {
+          name: "batch_create_list_items",
+          description:
+            "Create many items in a SharePoint list in one call using Graph $batch (chunks of 20). Returns per-item success/failure so partial failures can be retried.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              siteUrl: {
+                type: "string",
+                description: "SharePoint site URL",
+              },
+              listId: {
+                type: "string",
+                description: "List ID or name",
+              },
+              items: {
+                type: "array",
+                description: "Array of field objects, one per item (e.g. [{Title: 'A', Status: 'New'}, ...])",
+                items: { type: "object" },
+              },
+            },
+            required: ["siteUrl", "listId", "items"],
+          },
+        },
+        {
+          name: "resolve_user",
+          description:
+            "Resolve a person by email to their Entra ID identity, and (when siteUrl is given) to the site-local lookupId needed to set person columns in list items (set fields as {ColumnNameLookupId: <lookupId>}).",
+          inputSchema: {
+            type: "object",
+            properties: {
+              email: {
+                type: "string",
+                description: "The person's email address (member or guest)",
+              },
+              siteUrl: {
+                type: "string",
+                description: "Optional SharePoint site URL — when provided, also returns the site user lookupId for person columns",
+              },
+            },
+            required: ["email"],
           },
         },
         {
@@ -1522,6 +1718,22 @@ class SharePointServer {
             return await this.handleUpdateListItem(request.params.arguments);
           case "delete_list_item":
             return await this.handleDeleteListItem(request.params.arguments);
+          case "create_list":
+            return await this.handleCreateList(request.params.arguments);
+          case "get_list_columns":
+            return await this.handleGetListColumns(request.params.arguments);
+          case "create_list_column":
+            return await this.handleCreateListColumn(request.params.arguments);
+          case "update_list_column":
+            return await this.handleUpdateListColumn(request.params.arguments);
+          case "delete_list_column":
+            return await this.handleDeleteListColumn(request.params.arguments);
+          case "delete_list":
+            return await this.handleDeleteList(request.params.arguments);
+          case "batch_create_list_items":
+            return await this.handleBatchCreateListItems(request.params.arguments);
+          case "resolve_user":
+            return await this.handleResolveUser(request.params.arguments);
           case "upload_file":
             return await this.handleUploadFile(request.params.arguments);
           case "create_folder":
@@ -3740,7 +3952,7 @@ class SharePointServer {
   }
 
   private async handleGetListItems(args: any) {
-    const { siteUrl, listId, filter, select, top = 50, nextLink } = args || {};
+    const { siteUrl, listId, filter, orderby, select, top = 50, nextLink } = args || {};
     if (!siteUrl || !listId) throw new McpError(ErrorCode.InvalidParams, "siteUrl and listId are required");
 
     try {
@@ -3748,13 +3960,18 @@ class SharePointServer {
       let endpoint = `/sites/${siteId}/lists/${listId}/items?$expand=fields&$top=${Math.min(top, 200)}`;
       if (select) endpoint += `&$select=${encodeURIComponent(select)}`;
       if (filter) endpoint += `&$filter=${encodeURIComponent(filter)}`;
+      if (orderby) endpoint += `&$orderby=${encodeURIComponent(orderby)}`;
       if (nextLink) {
         // Extract $skiptoken from a previous nextLink and append
         const skipToken = new URL(nextLink).searchParams.get("$skiptoken");
         if (skipToken) endpoint += `&$skiptoken=${encodeURIComponent(skipToken)}`;
       }
 
-      const response = await this.graphRequestAsUser(endpoint);
+      // Graph rejects $filter/$orderby on non-indexed columns without this header
+      const extraHeaders = (filter || orderby)
+        ? { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" }
+        : undefined;
+      const response = await this.graphRequestAsUser(endpoint, "GET", undefined, 20000, extraHeaders);
       const items = (response.value || []).map((i: any) => ({
         id: i.id,
         fields: i.fields,
@@ -3846,6 +4063,327 @@ class SharePointServer {
       return { content: [{ type: "text", text: JSON.stringify({ success: true, deleted: itemId }) }] };
     } catch (error) {
       throw new Error(`Failed to delete list item: ${error}`);
+    }
+  }
+
+  /**
+   * Convert a friendly column spec into a Graph columnDefinition.
+   * Accepts a raw Graph definition via spec.definition as an escape hatch.
+   */
+  private buildColumnDefinition(spec: any): any {
+    if (spec.definition) return spec.definition;
+    const {
+      name, type, displayName, description, required, indexed,
+      enforceUniqueValues, defaultValue, choices, dateOnly,
+      allowMultiple, lookupListId, lookupColumnName,
+    } = spec || {};
+    if (!name || !type) {
+      throw new McpError(ErrorCode.InvalidParams, "each column needs at least name and type");
+    }
+
+    const def: any = { name };
+    if (displayName) def.displayName = displayName;
+    if (description) def.description = description;
+    if (required) def.required = true;
+    if (indexed) def.indexed = true;
+    if (enforceUniqueValues) def.enforceUniqueValues = true;
+    if (defaultValue !== undefined) def.defaultValue = { value: String(defaultValue) };
+
+    switch (type) {
+      case "text":
+        def.text = { allowMultipleLines: false };
+        break;
+      case "note":
+        def.text = { allowMultipleLines: true };
+        break;
+      case "choice":
+        def.choice = { choices: choices || [], displayAs: "dropDownMenu", allowTextEntry: false };
+        break;
+      case "number":
+        def.number = {};
+        break;
+      case "boolean":
+        def.boolean = {};
+        break;
+      case "dateTime":
+        def.dateTime = { format: dateOnly ? "dateOnly" : "dateTime" };
+        break;
+      case "person":
+        def.personOrGroup = { allowMultipleSelection: !!allowMultiple, chooseFromType: "peopleOnly" };
+        break;
+      case "hyperlink":
+        def.hyperlinkOrPicture = { isPicture: false };
+        break;
+      case "currency":
+        def.currency = { locale: "en-us" };
+        break;
+      case "lookup":
+        if (!lookupListId) {
+          throw new McpError(ErrorCode.InvalidParams, `lookup column '${name}' requires lookupListId`);
+        }
+        def.lookup = {
+          listId: lookupListId,
+          columnName: lookupColumnName || "Title",
+          allowMultipleValues: !!allowMultiple,
+        };
+        break;
+      default:
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `Unknown column type '${type}' for column '${name}' — use text, note, choice, number, boolean, dateTime, person, hyperlink, currency, or lookup`
+        );
+    }
+    return def;
+  }
+
+  /** Summarize a Graph columnDefinition down to what callers need. */
+  private summarizeColumn(c: any): any {
+    const typeKeys = [
+      "text", "choice", "number", "boolean", "dateTime", "personOrGroup",
+      "hyperlinkOrPicture", "currency", "lookup", "calculated", "contentApprovalStatus",
+    ];
+    const typeKey = typeKeys.find((k) => c[k] !== undefined);
+    let type = typeKey || "unknown";
+    if (typeKey === "text") type = c.text?.allowMultipleLines ? "note" : "text";
+    if (typeKey === "personOrGroup") type = "person";
+    if (typeKey === "hyperlinkOrPicture") type = "hyperlink";
+    const summary: any = {
+      id: c.id,
+      name: c.name,
+      displayName: c.displayName,
+      type,
+      required: c.required || false,
+      indexed: c.indexed || false,
+      readOnly: c.readOnly || false,
+      hidden: c.hidden || false,
+    };
+    if (c.description) summary.description = c.description;
+    if (c.choice?.choices) summary.choices = c.choice.choices;
+    if (c.lookup) summary.lookup = { listId: c.lookup.listId, columnName: c.lookup.columnName };
+    if (c.defaultValue?.value !== undefined) summary.defaultValue = c.defaultValue.value;
+    return summary;
+  }
+
+  private async handleCreateList(args: any) {
+    const { siteUrl, displayName, description, template = "genericList", columns } = args || {};
+    if (!siteUrl || !displayName) throw new McpError(ErrorCode.InvalidParams, "siteUrl and displayName are required");
+
+    try {
+      const siteId = await this.getSiteIdFromUrl(siteUrl);
+      const body: any = {
+        displayName,
+        list: { template },
+      };
+      if (description) body.description = description;
+      if (Array.isArray(columns) && columns.length > 0) {
+        body.columns = columns.map((c: any) => this.buildColumnDefinition(c));
+      }
+      const list = await this.graphRequestAsUser(`/sites/${siteId}/lists`, "POST", body);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            id: list.id,
+            name: list.name,
+            displayName: list.displayName,
+            webUrl: list.webUrl,
+            template: list.list?.template,
+          }, null, 2),
+        }],
+      };
+    } catch (error) {
+      throw new Error(`Failed to create list: ${error}`);
+    }
+  }
+
+  private async handleGetListColumns(args: any) {
+    const { siteUrl, listId, includeHidden = false } = args || {};
+    if (!siteUrl || !listId) throw new McpError(ErrorCode.InvalidParams, "siteUrl and listId are required");
+
+    try {
+      const siteId = await this.getSiteIdFromUrl(siteUrl);
+      const response = await this.graphRequestAsUser(`/sites/${siteId}/lists/${listId}/columns?$top=200`);
+      let columns = (response.value || []).map((c: any) => this.summarizeColumn(c));
+      if (!includeHidden) columns = columns.filter((c: any) => !c.hidden && !c.readOnly);
+      return { content: [{ type: "text", text: JSON.stringify(columns, null, 2) }] };
+    } catch (error) {
+      throw new Error(`Failed to get list columns: ${error}`);
+    }
+  }
+
+  private async handleCreateListColumn(args: any) {
+    const { siteUrl, listId, column } = args || {};
+    if (!siteUrl || !listId || !column) throw new McpError(ErrorCode.InvalidParams, "siteUrl, listId, and column are required");
+
+    try {
+      const siteId = await this.getSiteIdFromUrl(siteUrl);
+      const def = this.buildColumnDefinition(column);
+      const created = await this.graphRequestAsUser(`/sites/${siteId}/lists/${listId}/columns`, "POST", def);
+      return { content: [{ type: "text", text: JSON.stringify(this.summarizeColumn(created), null, 2) }] };
+    } catch (error) {
+      throw new Error(`Failed to create list column: ${error}`);
+    }
+  }
+
+  private async handleUpdateListColumn(args: any) {
+    const { siteUrl, listId, columnId, patch } = args || {};
+    if (!siteUrl || !listId || !columnId || !patch) {
+      throw new McpError(ErrorCode.InvalidParams, "siteUrl, listId, columnId, and patch are required");
+    }
+
+    try {
+      const siteId = await this.getSiteIdFromUrl(siteUrl);
+      const updated = await this.graphRequestAsUser(
+        `/sites/${siteId}/lists/${listId}/columns/${columnId}`,
+        "PATCH",
+        patch
+      );
+      return { content: [{ type: "text", text: JSON.stringify(this.summarizeColumn(updated), null, 2) }] };
+    } catch (error) {
+      throw new Error(`Failed to update list column: ${error}`);
+    }
+  }
+
+  private async handleDeleteListColumn(args: any) {
+    const { siteUrl, listId, columnId } = args || {};
+    if (!siteUrl || !listId || !columnId) throw new McpError(ErrorCode.InvalidParams, "siteUrl, listId, and columnId are required");
+
+    try {
+      const siteId = await this.getSiteIdFromUrl(siteUrl);
+      const token = await this.getUserAccessToken();
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/columns/${columnId}`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      return { content: [{ type: "text", text: JSON.stringify({ success: true, deletedColumn: columnId }) }] };
+    } catch (error) {
+      throw new Error(`Failed to delete list column: ${error}`);
+    }
+  }
+
+  private async handleDeleteList(args: any) {
+    const { siteUrl, listId } = args || {};
+    if (!siteUrl || !listId) throw new McpError(ErrorCode.InvalidParams, "siteUrl and listId are required");
+
+    try {
+      const siteId = await this.getSiteIdFromUrl(siteUrl);
+      const token = await this.getUserAccessToken();
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      return { content: [{ type: "text", text: JSON.stringify({ success: true, deletedList: listId }) }] };
+    } catch (error) {
+      throw new Error(`Failed to delete list: ${error}`);
+    }
+  }
+
+  private async handleBatchCreateListItems(args: any) {
+    const { siteUrl, listId, items } = args || {};
+    if (!siteUrl || !listId || !Array.isArray(items) || items.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "siteUrl, listId, and a non-empty items array are required");
+    }
+
+    try {
+      const siteId = await this.getSiteIdFromUrl(siteUrl);
+      const results: any[] = [];
+      const BATCH_SIZE = 20; // Graph $batch limit
+
+      for (let offset = 0; offset < items.length; offset += BATCH_SIZE) {
+        const chunk = items.slice(offset, offset + BATCH_SIZE);
+        const batchBody = {
+          requests: chunk.map((fields: any, i: number) => ({
+            id: String(offset + i),
+            method: "POST",
+            url: `/sites/${siteId}/lists/${listId}/items`,
+            headers: { "Content-Type": "application/json" },
+            body: { fields },
+          })),
+        };
+        const batchResponse = await this.graphRequestAsUser("https://graph.microsoft.com/v1.0/$batch", "POST", batchBody, 60000);
+        for (const r of batchResponse.responses || []) {
+          const index = parseInt(r.id, 10);
+          if (r.status >= 200 && r.status < 300) {
+            results.push({ index, success: true, id: r.body?.id, webUrl: r.body?.webUrl });
+          } else {
+            results.push({
+              index,
+              success: false,
+              status: r.status,
+              error: r.body?.error?.message || JSON.stringify(r.body),
+            });
+          }
+        }
+      }
+
+      results.sort((a, b) => a.index - b.index);
+      const failed = results.filter((r) => !r.success);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            total: items.length,
+            created: results.length - failed.length,
+            failed: failed.length,
+            results,
+          }, null, 2),
+        }],
+      };
+    } catch (error) {
+      throw new Error(`Failed to batch create list items: ${error}`);
+    }
+  }
+
+  private async handleResolveUser(args: any) {
+    const { email, siteUrl } = args || {};
+    if (!email) throw new McpError(ErrorCode.InvalidParams, "email is required");
+
+    try {
+      // Guests have mangled UPNs (user_domain#EXT#@tenant), so filter by mail rather than addressing by UPN
+      const encoded = encodeURIComponent(`mail eq '${email.replace(/'/g, "''")}'`);
+      const userResp = await this.graphRequestAsUser(
+        `/users?$filter=${encoded}&$select=id,displayName,mail,userPrincipalName,userType`
+      );
+      const user = (userResp.value || [])[0];
+      if (!user) {
+        return { content: [{ type: "text", text: JSON.stringify({ found: false, email }) }] };
+      }
+
+      const result: any = {
+        found: true,
+        id: user.id,
+        displayName: user.displayName,
+        mail: user.mail,
+        userPrincipalName: user.userPrincipalName,
+        userType: user.userType,
+      };
+
+      if (siteUrl) {
+        // Person columns need the site-local lookupId from the hidden User Information List
+        const siteId = await this.getSiteIdFromUrl(siteUrl);
+        const filter = encodeURIComponent(`fields/EMail eq '${email.replace(/'/g, "''")}'`);
+        const luResp = await this.graphRequestAsUser(
+          `/sites/${siteId}/lists/User Information List/items?$filter=${filter}&$select=id`,
+          "GET",
+          undefined,
+          20000,
+          { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" }
+        );
+        const entry = (luResp.value || [])[0];
+        if (entry) {
+          result.siteLookupId = parseInt(entry.id, 10);
+          result.personFieldHint = `Set person columns as {\"<ColumnName>LookupId\": ${result.siteLookupId}}`;
+        } else {
+          result.siteLookupId = null;
+          result.note = "User exists in the tenant but has not yet been seen by this site; have them visit the site once or share an item with them to register them.";
+        }
+      }
+
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      throw new Error(`Failed to resolve user: ${error}`);
     }
   }
 
