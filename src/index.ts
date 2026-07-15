@@ -3957,8 +3957,9 @@ class SharePointServer {
 
     try {
       const siteId = await this.getSiteIdFromUrl(siteUrl);
-      let endpoint = `/sites/${siteId}/lists/${listId}/items?$expand=fields&$top=${Math.min(top, 200)}`;
-      if (select) endpoint += `&$select=${encodeURIComponent(select)}`;
+      // Field names go inside the fields expansion, not the top-level $select (which only accepts listItem properties)
+      const expand = select ? `fields($select=${select})` : "fields";
+      let endpoint = `/sites/${siteId}/lists/${listId}/items?$expand=${encodeURIComponent(expand)}&$top=${Math.min(top, 200)}`;
       if (filter) endpoint += `&$filter=${encodeURIComponent(filter)}`;
       if (orderby) endpoint += `&$orderby=${encodeURIComponent(orderby)}`;
       if (nextLink) {
