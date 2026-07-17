@@ -489,7 +489,7 @@ export class SharePointServer {
         {
           name: "download_file",
           description:
-            "Download a file's RAW bytes to a local path on disk (no text extraction), preserving the exact binary. Use this to round-trip Office files: download_file → edit word/document.xml in place → upload_file with localFilePath. Returns the local path and size. Same addressing as get_file_content (filePath or webUrl + scope/siteUrl/driveId).",
+            "Download a file's RAW bytes, preserving the exact binary (no text extraction). With localFilePath, writes to disk ON THE MACHINE RUNNING THIS MCP SERVER — for a remotely-hosted server that is NOT the calling client's machine, so use this only for server-side round-trips (download_file → edit word/document.xml in place → upload_file with localFilePath). Omit localFilePath to get the bytes back inline as base64 (capped at 5MB) so the client can save them wherever 'local' means for it. Same addressing as get_file_content (filePath or webUrl + scope/siteUrl/driveId).",
           inputSchema: {
             type: "object",
             properties: {
@@ -499,7 +499,7 @@ export class SharePointServer {
               },
               localFilePath: {
                 type: "string",
-                description: "Absolute local destination path to write the raw bytes to (e.g. /tmp/contract.docx). Parent directory must exist.",
+                description: "Absolute destination path to write the raw bytes to, on the machine running this MCP server (e.g. /tmp/contract.docx). Parent directory must exist. Omit to receive the bytes inline as base64 instead.",
               },
               siteUrl: {
                 type: "string",
@@ -516,7 +516,7 @@ export class SharePointServer {
                 default: "tenant",
               },
             },
-            required: ["filePath", "localFilePath"],
+            required: ["filePath"],
           },
         },
         {
@@ -824,7 +824,7 @@ export class SharePointServer {
         {
           name: "save_email_attachment",
           description:
-            "Save one email attachment's RAW bytes to a local path on disk, preserving the exact binary. Call get_email_attachments first to get the attachment id. Returns the local path and size. Same shape as download_file: the parent directory must exist.",
+            "Retrieve one email attachment's RAW bytes, preserving the exact binary. Call get_email_attachments first to get the attachment id. With localFilePath, writes to disk ON THE MACHINE RUNNING THIS MCP SERVER — for a remotely-hosted server that is NOT the calling client's machine. Omit localFilePath to get the bytes back inline as base64 (capped at 5MB) so the client can save them wherever 'local' means for it.",
           inputSchema: {
             type: "object",
             properties: {
@@ -839,10 +839,10 @@ export class SharePointServer {
               localFilePath: {
                 type: "string",
                 description:
-                  "Absolute local destination path to write the raw bytes to (e.g. /tmp/score.pdf). Parent directory must exist.",
+                  "Absolute destination path to write the raw bytes to, on the machine running this MCP server (e.g. /tmp/score.pdf). Parent directory must exist. Omit to receive the bytes inline as base64 instead.",
               },
             },
-            required: ["messageId", "attachmentId", "localFilePath"],
+            required: ["messageId", "attachmentId"],
           },
         },
         {
@@ -2120,7 +2120,7 @@ export class SharePointServer {
     if (typeof filePath !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "filePath parameter must be a string");
     }
-    if (typeof localFilePath !== "string") {
+    if (localFilePath !== undefined && typeof localFilePath !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "localFilePath parameter must be a string");
     }
 
@@ -2147,6 +2147,11 @@ export class SharePointServer {
     }
 
     const buf = Buffer.from(await response.arrayBuffer());
+
+    if (!localFilePath) {
+      return this.inlineBytesResult(buf, { filePath });
+    }
+
     try {
       fs.writeFileSync(localFilePath, buf);
     } catch (err: any) {
@@ -2157,6 +2162,30 @@ export class SharePointServer {
       content: [{
         type: "text",
         text: JSON.stringify({ localFilePath, bytes: buf.length }, null, 2),
+      }],
+    };
+  }
+
+  /**
+   * The MCP server process may run on a different host than the calling client
+   * (e.g. the Streamable HTTP transport deployed remotely) — writing to
+   * localFilePath there means the file lands on the server's disk, not the
+   * client's. When no localFilePath is given, return the bytes inline so the
+   * client can place them wherever "local" actually means for it.
+   */
+  private inlineBytesResult(buf: Buffer, meta: Record<string, unknown>) {
+    const MAX_INLINE_BYTES = 5_000_000; // 5 MB, base64-encoded this is ~6.7 MB of JSON
+    if (buf.length > MAX_INLINE_BYTES) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `File is ${(buf.length / 1024).toFixed(0)} KB, too large to return inline (limit ${MAX_INLINE_BYTES / 1024} KB). ` +
+          "Pass localFilePath to write it to disk on the machine running this MCP server instead."
+      );
+    }
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ ...meta, bytes: buf.length, contentBase64: buf.toString("base64") }, null, 2),
       }],
     };
   }
@@ -3381,7 +3410,7 @@ export class SharePointServer {
   private async handleSaveEmailAttachment(args: any) {
     const messageId: string = args?.messageId;
     const attachmentId: string = args?.attachmentId;
-    const localFilePath: string = args?.localFilePath;
+    const localFilePath: string | undefined = args?.localFilePath;
 
     if (typeof messageId !== "string" || !messageId) {
       throw new McpError(ErrorCode.InvalidParams, "messageId is required");
@@ -3389,7 +3418,7 @@ export class SharePointServer {
     if (typeof attachmentId !== "string" || !attachmentId) {
       throw new McpError(ErrorCode.InvalidParams, "attachmentId is required (see get_email_attachments)");
     }
-    if (typeof localFilePath !== "string" || !localFilePath) {
+    if (localFilePath !== undefined && typeof localFilePath !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "localFilePath must be an absolute local path");
     }
 
@@ -3410,6 +3439,11 @@ export class SharePointServer {
     }
 
     const buf = Buffer.from(attachment.contentBytes, "base64");
+
+    if (!localFilePath) {
+      return this.inlineBytesResult(buf, { name: attachment.name, contentType: attachment.contentType });
+    }
+
     try {
       fs.writeFileSync(localFilePath, buf);
     } catch (err: any) {
