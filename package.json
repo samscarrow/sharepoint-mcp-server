@@ -38,14 +38,17 @@
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",
     "test": "node test/basic-test.js",
     "oauth-login": "node build/oauth-login.js",
-    "bundle:docx-edit": "npx --yes esbuild scripts/docx-edit.mjs --bundle --platform=node --format=esm --outfile=scripts/docx-edit.bundle.mjs --legal-comments=none && node -e \"require('fs').chmodSync('scripts/docx-edit.bundle.mjs','755')\""
+    "bundle:docx-edit": "npx --yes esbuild scripts/docx-edit.mjs --bundle --platform=node --format=esm --outfile=scripts/docx-edit.bundle.mjs --legal-comments=none && node -e \"require('fs').chmodSync('scripts/docx-edit.bundle.mjs','755')\"",
+    "start:http": "node build/http.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "0.6.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.2.1",
     "jszip": "^3.10.1",
     "pdf-parse": "^2.4.5"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^20.11.24",
     "typescript": "^5.3.3"
   }

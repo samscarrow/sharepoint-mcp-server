@@ -10,6 +10,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -20,6 +21,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import JSZip from "jszip";
 import { PDFParse } from "pdf-parse";
 
@@ -73,6 +75,14 @@ const TOKEN_FILE =
 
 const DELEGATED_SCOPES = "Mail.ReadWrite Mail.Send Files.Read Files.Read.All Files.ReadWrite Files.ReadWrite.All Sites.ReadWrite.All Sites.Manage.All User.ReadBasic.All Calendars.Read Calendars.ReadBasic Calendars.ReadWrite Calendars.Read.Shared ChannelMessage.Send Tasks.ReadWrite offline_access";
 
+// Token caches live at module scope, not on the instance. The HTTP transport builds a
+// fresh Server per request (stateless mode), and per-instance caches would mean a Graph
+// token round-trip on every single request.
+let accessToken: string | null = null;
+let tokenExpiry: number = 0;
+let userAccessToken: string | null = null;
+let userTokenExpiry: number = 0;
+
 /**
  * Interface for Microsoft Graph API responses
  */
@@ -85,12 +95,8 @@ interface GraphResponse {
  * SharePoint MCP Server implementation
  * Provides tools and resources for interacting with Microsoft SharePoint via Microsoft Graph API
  */
-class SharePointServer {
+export class SharePointServer {
   private server: Server;
-  private accessToken: string | null = null;
-  private tokenExpiry: number = 0;
-  private userAccessToken: string | null = null;
-  private userTokenExpiry: number = 0;
 
   constructor() {
     this.server = new Server(
@@ -114,8 +120,8 @@ class SharePointServer {
    * Get access token for Microsoft Graph API
    */
   private async getAccessToken(): Promise<string> {
-    if (this.accessToken && Date.now() < this.tokenExpiry) {
-      return this.accessToken;
+    if (accessToken && Date.now() < tokenExpiry) {
+      return accessToken;
     }
 
     const tenantId = TENANT_ID!;
@@ -144,10 +150,10 @@ class SharePointServer {
       }
 
       const data = await response.json();
-      this.accessToken = data.access_token;
-      this.tokenExpiry = Date.now() + (data.expires_in * 1000) - 60000; // Refresh 1 minute early
+      accessToken = data.access_token;
+      tokenExpiry = Date.now() + (data.expires_in * 1000) - 60000; // Refresh 1 minute early
 
-      return this.accessToken!;
+      return accessToken!;
     } catch (error) {
       throw new Error(`Failed to get access token: ${error}`);
     }
@@ -202,8 +208,8 @@ class SharePointServer {
    * Reads refresh token from disk and refreshes as needed.
    */
   private async getUserAccessToken(): Promise<string> {
-    if (this.userAccessToken && Date.now() < this.userTokenExpiry) {
-      return this.userAccessToken;
+    if (userAccessToken && Date.now() < userTokenExpiry) {
+      return userAccessToken;
     }
 
     if (!fs.existsSync(TOKEN_FILE)) {
@@ -216,9 +222,9 @@ class SharePointServer {
 
     // Use cached access token if still valid
     if (tokens.access_token && Date.now() < tokens.expires_at) {
-      this.userAccessToken = tokens.access_token;
-      this.userTokenExpiry = tokens.expires_at;
-      return this.userAccessToken!;
+      userAccessToken = tokens.access_token;
+      userTokenExpiry = tokens.expires_at;
+      return userAccessToken!;
     }
 
     // Refresh
@@ -258,9 +264,9 @@ class SharePointServer {
     };
     fs.writeFileSync(TOKEN_FILE, JSON.stringify(updated, null, 2), { mode: 0o600 });
 
-    this.userAccessToken = data.access_token;
-    this.userTokenExpiry = updated.expires_at;
-    return this.userAccessToken!;
+    userAccessToken = data.access_token;
+    userTokenExpiry = updated.expires_at;
+    return userAccessToken!;
   }
 
   /**
@@ -322,11 +328,10 @@ class SharePointServer {
    */
   private setupErrorHandling(): void {
     this.server.onerror = (error) => console.error("[MCP Error]", error);
-    
-    process.on("SIGINT", async () => {
-      await this.server.close();
-      process.exit(0);
-    });
+    // NOTE: no process-level signal handlers here. Under the HTTP transport a
+    // SharePointServer is constructed per request, and a `process.on("SIGINT")` closure
+    // would capture `this.server` and retain it for the life of the process. Signal
+    // handling belongs to the entry point (see the bootstrap below, and http.ts).
   }
 
   /**
@@ -484,7 +489,7 @@ class SharePointServer {
         {
           name: "download_file",
           description:
-            "Download a file's RAW bytes to a local path on disk (no text extraction), preserving the exact binary. Use this to round-trip Office files: download_file → edit word/document.xml in place → upload_file with localFilePath. Returns the local path and size. Same addressing as get_file_content (filePath or webUrl + scope/siteUrl/driveId).",
+            "Download a file's RAW bytes, preserving the exact binary (no text extraction). With localFilePath, writes to disk ON THE MACHINE RUNNING THIS MCP SERVER — for a remotely-hosted server that is NOT the calling client's machine, so use this only for server-side round-trips (download_file → edit word/document.xml in place → upload_file with localFilePath). Omit localFilePath to get the bytes back inline as base64 (capped at 5MB) so the client can save them wherever 'local' means for it. Same addressing as get_file_content (filePath or webUrl + scope/siteUrl/driveId).",
           inputSchema: {
             type: "object",
             properties: {
@@ -494,7 +499,7 @@ class SharePointServer {
               },
               localFilePath: {
                 type: "string",
-                description: "Absolute local destination path to write the raw bytes to (e.g. /tmp/contract.docx). Parent directory must exist.",
+                description: "Absolute destination path to write the raw bytes to, on the machine running this MCP server (e.g. /tmp/contract.docx). Parent directory must exist. Omit to receive the bytes inline as base64 instead.",
               },
               siteUrl: {
                 type: "string",
@@ -511,7 +516,7 @@ class SharePointServer {
                 default: "tenant",
               },
             },
-            required: ["filePath", "localFilePath"],
+            required: ["filePath"],
           },
         },
         {
@@ -819,7 +824,7 @@ class SharePointServer {
         {
           name: "save_email_attachment",
           description:
-            "Save one email attachment's RAW bytes to a local path on disk, preserving the exact binary. Call get_email_attachments first to get the attachment id. Returns the local path and size. Same shape as download_file: the parent directory must exist.",
+            "Retrieve one email attachment's RAW bytes, preserving the exact binary. Call get_email_attachments first to get the attachment id. With localFilePath, writes to disk ON THE MACHINE RUNNING THIS MCP SERVER — for a remotely-hosted server that is NOT the calling client's machine. Omit localFilePath to get the bytes back inline as base64 (capped at 5MB) so the client can save them wherever 'local' means for it.",
           inputSchema: {
             type: "object",
             properties: {
@@ -834,10 +839,10 @@ class SharePointServer {
               localFilePath: {
                 type: "string",
                 description:
-                  "Absolute local destination path to write the raw bytes to (e.g. /tmp/score.pdf). Parent directory must exist.",
+                  "Absolute destination path to write the raw bytes to, on the machine running this MCP server (e.g. /tmp/score.pdf). Parent directory must exist. Omit to receive the bytes inline as base64 instead.",
               },
             },
-            required: ["messageId", "attachmentId", "localFilePath"],
+            required: ["messageId", "attachmentId"],
           },
         },
         {
@@ -2327,7 +2332,7 @@ class SharePointServer {
     if (typeof filePath !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "filePath parameter must be a string");
     }
-    if (typeof localFilePath !== "string") {
+    if (localFilePath !== undefined && typeof localFilePath !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "localFilePath parameter must be a string");
     }
 
@@ -2354,6 +2359,11 @@ class SharePointServer {
     }
 
     const buf = Buffer.from(await response.arrayBuffer());
+
+    if (!localFilePath) {
+      return this.inlineBytesResult(buf, { filePath });
+    }
+
     try {
       fs.writeFileSync(localFilePath, buf);
     } catch (err: any) {
@@ -2364,6 +2374,30 @@ class SharePointServer {
       content: [{
         type: "text",
         text: JSON.stringify({ localFilePath, bytes: buf.length }, null, 2),
+      }],
+    };
+  }
+
+  /**
+   * The MCP server process may run on a different host than the calling client
+   * (e.g. the Streamable HTTP transport deployed remotely) — writing to
+   * localFilePath there means the file lands on the server's disk, not the
+   * client's. When no localFilePath is given, return the bytes inline so the
+   * client can place them wherever "local" actually means for it.
+   */
+  private inlineBytesResult(buf: Buffer, meta: Record<string, unknown>) {
+    const MAX_INLINE_BYTES = 5_000_000; // 5 MB, base64-encoded this is ~6.7 MB of JSON
+    if (buf.length > MAX_INLINE_BYTES) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `File is ${(buf.length / 1024).toFixed(0)} KB, too large to return inline (limit ${MAX_INLINE_BYTES / 1024} KB). ` +
+          "Pass localFilePath to write it to disk on the machine running this MCP server instead."
+      );
+    }
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ ...meta, bytes: buf.length, contentBase64: buf.toString("base64") }, null, 2),
       }],
     };
   }
@@ -3588,7 +3622,7 @@ class SharePointServer {
   private async handleSaveEmailAttachment(args: any) {
     const messageId: string = args?.messageId;
     const attachmentId: string = args?.attachmentId;
-    const localFilePath: string = args?.localFilePath;
+    const localFilePath: string | undefined = args?.localFilePath;
 
     if (typeof messageId !== "string" || !messageId) {
       throw new McpError(ErrorCode.InvalidParams, "messageId is required");
@@ -3596,7 +3630,7 @@ class SharePointServer {
     if (typeof attachmentId !== "string" || !attachmentId) {
       throw new McpError(ErrorCode.InvalidParams, "attachmentId is required (see get_email_attachments)");
     }
-    if (typeof localFilePath !== "string" || !localFilePath) {
+    if (localFilePath !== undefined && typeof localFilePath !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "localFilePath must be an absolute local path");
     }
 
@@ -3617,6 +3651,11 @@ class SharePointServer {
     }
 
     const buf = Buffer.from(attachment.contentBytes, "base64");
+
+    if (!localFilePath) {
+      return this.inlineBytesResult(buf, { name: attachment.name, contentType: attachment.contentType });
+    }
+
     try {
       fs.writeFileSync(localFilePath, buf);
     } catch (err: any) {
@@ -4389,7 +4428,22 @@ class SharePointServer {
   }
 
   /**
-   * Start the MCP server
+   * Attach this server to any MCP transport (stdio, Streamable HTTP, ...).
+   */
+  async connect(transport: Transport): Promise<void> {
+    await this.server.connect(transport);
+  }
+
+  /**
+   * Close the underlying MCP server. Callers using a per-request instance must call
+   * this when the request ends, or the instance leaks.
+   */
+  async close(): Promise<void> {
+    await this.server.close();
+  }
+
+  /**
+   * Start the MCP server on stdio.
    */
   async run(): Promise<void> {
     const transport = new StdioServerTransport();
@@ -4399,10 +4453,26 @@ class SharePointServer {
 }
 
 /**
- * Main entry point
+ * Main entry point — only when this module is executed directly. Importing it (e.g. from
+ * http.ts) must not start a stdio server.
  */
-const server = new SharePointServer();
-server.run().catch((error) => {
-  console.error("Failed to start SharePoint MCP server:", error);
-  process.exit(1);
-});
+const isEntrypoint =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  const server = new SharePointServer();
+
+  // Registered once, for the process — not per Server instance.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, async () => {
+      await server.close();
+      process.exit(0);
+    });
+  }
+
+  server.run().catch((error) => {
+    console.error("Failed to start SharePoint MCP server:", error);
+    process.exit(1);
+  });
+}
