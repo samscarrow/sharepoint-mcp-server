@@ -671,46 +671,60 @@ export class SharePointServer {
         {
           name: "create_draft",
           description:
-            "Create a draft email saved in your Drafts folder (delegated auth). Populates recipients and subject so you can open it in Outlook to tweak and send — nothing is sent. Returns the draft id and webLink (open in Outlook). Body is optional; recipients and subject are required.",
+            "Create a draft email saved in your Drafts folder (delegated auth) — nothing is sent. Returns the draft id, webLink (open in Outlook) and conversationId. Two modes: (1) NEW draft — pass to + subject; (2) THREADED draft — pass replyToMessageId (from list_emails/search_emails/get_thread) plus mode reply|replyAll|forward, and the draft joins that conversation with the quoted history and threading headers intact, so Outlook files it in the thread instead of starting a new one. For reply/replyAll the recipients and RE: subject are inherited (to/subject optional; anything you pass in to/cc/bcc is added to the inherited list, never replaces it). For forward, to is required. Use this instead of reply_email when the reply should be reviewed before sending — reply_email sends immediately.",
           inputSchema: {
             type: "object",
             properties: {
               to: {
                 type: "array",
                 items: { type: "string" },
-                description: "Recipient email addresses",
+                description:
+                  "Recipient email addresses. Required for a new draft and for mode=forward; optional for reply/replyAll, where it is added on top of the inherited recipients.",
               },
               subject: {
                 type: "string",
-                description: "Email subject line",
+                description:
+                  "Email subject line. Required for a new draft; optional when threading (defaults to the inherited RE:/FW: subject).",
               },
               body: {
                 type: "string",
-                description: "Email body (HTML supported). Optional — omit to leave the body empty for you to write.",
+                description: "Email body (HTML supported). Optional — omit to leave the body empty for you to write. On a threaded draft this goes above the quoted original.",
               },
               cc: {
                 type: "array",
                 items: { type: "string" },
-                description: "CC recipient email addresses",
+                description: "CC recipient email addresses (added on top of any inherited when threading)",
               },
               bcc: {
                 type: "array",
                 items: { type: "string" },
-                description: "BCC recipient email addresses",
+                description: "BCC recipient email addresses (added on top of any inherited when threading)",
               },
               bodyType: {
                 type: "string",
                 enum: ["HTML", "Text"],
-                description: "Body content type (default: HTML)",
+                description: "Body content type (default: HTML). Threaded drafts are always HTML because the quoted history is HTML; Text bodies are escaped and line-broken into it.",
                 default: "HTML",
               },
+              replyToMessageId: {
+                type: "string",
+                description:
+                  "Message ID to thread this draft onto. Set this to reply to / forward an existing email as a draft rather than starting a new conversation.",
+              },
+              mode: {
+                type: "string",
+                enum: ["reply", "replyAll", "forward"],
+                description:
+                  "How to thread onto replyToMessageId (default: reply). Ignored when replyToMessageId is omitted.",
+                default: "reply",
+              },
             },
-            required: ["to", "subject"],
           },
         },
         {
           name: "reply_email",
-          description: "Reply to an email by message ID",
+          description:
+            "Reply to an email by message ID and send it immediately. To stage a reply for review instead, use create_draft with replyToMessageId — it produces the same threaded message as an unsent draft.",
           inputSchema: {
             type: "object",
             properties: {
@@ -3144,6 +3158,88 @@ export class SharePointServer {
   }
 
   /**
+   * Load the saved inline signature image, if the user has one.
+   * Returns the base64 bytes, the content id to reference it by, and the HTML
+   * snippet that renders it — or null when no signature.png is saved.
+   */
+  private loadSignature(): { bytes: string; cid: string; html: string } | null {
+    const sigFile = path.join(path.dirname(TOKEN_FILE), "signature.png");
+    if (!fs.existsSync(sigFile)) return null;
+    const cid = "bay-view-signature";
+    return {
+      bytes: fs.readFileSync(sigFile).toString("base64"),
+      cid,
+      html:
+        `<br><br><a href="https://bayviewassociation.org" style="text-decoration:none">` +
+        `<img src="cid:${cid}" width="484" height="215" style="max-width:780px; display:block">` +
+        `</a>`,
+    };
+  }
+
+  /** Graph fileAttachment payload for the inline signature image. */
+  private signatureAttachment(sig: { bytes: string; cid: string }) {
+    return {
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      name: "signature.png",
+      contentType: "image/png",
+      contentBytes: sig.bytes,
+      isInline: true,
+      contentId: sig.cid,
+    };
+  }
+
+  /** Normalize a recipient arg that may arrive as a bare string or an array. */
+  private toEmailList(raw: any): string[] {
+    if (!raw) return [];
+    return typeof raw === "string" ? [raw] : Array.isArray(raw) ? raw : [];
+  }
+
+  private toRecipientObjects(emails: string[]) {
+    return emails.map((email) => ({ emailAddress: { address: email } }));
+  }
+
+  /**
+   * Merge extra addresses into a Graph recipient collection, de-duped by address.
+   * Graph PATCH *replaces* a recipient collection outright, so anything seeded by
+   * createReply/createReplyAll must be carried forward explicitly or it is dropped.
+   */
+  private mergeRecipients(existing: any[] | undefined, additions: string[]) {
+    const merged = [...(existing || [])];
+    const seen = new Set(
+      merged
+        .map((r) => r?.emailAddress?.address?.toLowerCase())
+        .filter((a): a is string => !!a)
+    );
+    for (const email of additions) {
+      const key = email.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push({ emailAddress: { address: email } });
+    }
+    return merged;
+  }
+
+  /**
+   * Insert authored content at the top of a reply/forward body, keeping the
+   * quoted thread beneath it. A function replacer avoids `$` in the authored
+   * HTML being read as a replacement pattern. Bare prepend if there's no <body>.
+   */
+  private prependAboveQuote(quoted: string, authored: string): string {
+    return /<body[^>]*>/i.test(quoted)
+      ? quoted.replace(/<body[^>]*>/i, (m) => m + authored)
+      : authored + quoted;
+  }
+
+  /** Escape plain text and preserve line breaks so it can live in an HTML body. */
+  private textToHtml(text: string): string {
+    return text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\r?\n/g, "<br>");
+  }
+
+  /**
    * Handle send email tool request (delegated /me/ endpoint)
    */
   private async handleSendEmail(args: any) {
@@ -3161,45 +3257,19 @@ export class SharePointServer {
       throw new McpError(ErrorCode.InvalidParams, "to, subject, and body are required");
     }
 
-    const toRecipients = to.map((email) => ({ emailAddress: { address: email } }));
-    const ccRecipients = cc.map((email) => ({ emailAddress: { address: email } }));
-    const bccRecipients = bcc.map((email) => ({ emailAddress: { address: email } }));
-
     // Auto-append signature if image file is saved
-    const sigFile = path.join(
-      path.dirname(TOKEN_FILE),
-      "signature.png"
-    );
-    const attachments: any[] = [];
-    let finalBody = body;
-
-    if (bodyType === "HTML" && fs.existsSync(sigFile)) {
-      const sigBytes = fs.readFileSync(sigFile).toString("base64");
-      const sigCid = "bay-view-signature";
-      attachments.push({
-        "@odata.type": "#microsoft.graph.fileAttachment",
-        name: "signature.png",
-        contentType: "image/png",
-        contentBytes: sigBytes,
-        isInline: true,
-        contentId: sigCid,
-      });
-      finalBody =
-        body +
-        `<br><br><a href="https://bayviewassociation.org" style="text-decoration:none">` +
-        `<img src="cid:${sigCid}" width="484" height="215" style="max-width:780px; display:block">` +
-        `</a>`;
-    }
+    const sig = bodyType === "HTML" ? this.loadSignature() : null;
+    const finalBody = sig ? body + sig.html : body;
 
     const message: any = {
       subject,
       body: { contentType: bodyType, content: finalBody },
-      toRecipients,
-      ccRecipients,
-      bccRecipients,
+      toRecipients: this.toRecipientObjects(to),
+      ccRecipients: this.toRecipientObjects(cc),
+      bccRecipients: this.toRecipientObjects(bcc),
     };
-    if (attachments.length > 0) {
-      message.attachments = attachments;
+    if (sig) {
+      message.attachments = [this.signatureAttachment(sig)];
     }
 
     await this.graphRequestAsUser("/me/sendMail", "POST", { message });
@@ -3211,7 +3281,7 @@ export class SharePointServer {
           text: JSON.stringify({
             success: true,
             message: `Email sent to ${to.join(", ")}`,
-            signatureIncluded: attachments.length > 0,
+            signatureIncluded: !!sig,
           }),
         },
       ],
@@ -3222,59 +3292,45 @@ export class SharePointServer {
    * Handle create draft tool request (delegated /me/ endpoint).
    * Creates an unsent message; POST /me/messages saves it in the Drafts folder
    * so the user can open it in Outlook to tweak and send.
+   *
+   * With replyToMessageId, the draft is created off the existing message via
+   * createReply/createReplyAll/createForward instead, so it inherits the
+   * conversation (threading headers + quoted history) rather than starting a
+   * new thread that merely reuses the subject line.
    */
   private async handleCreateDraft(args: any) {
-    const toRaw = args?.to;
-    const to: string[] = typeof toRaw === "string" ? [toRaw] : toRaw;
-    const subject: string = args?.subject;
-    const body: string = args?.body || "";
-    const ccRaw = args?.cc;
-    const cc: string[] = typeof ccRaw === "string" ? [ccRaw] : (ccRaw || []);
-    const bccRaw = args?.bcc;
-    const bcc: string[] = typeof bccRaw === "string" ? [bccRaw] : (bccRaw || []);
-    const bodyType: string = args?.bodyType || "HTML";
-
-    if (!Array.isArray(to) || !to.length || !subject) {
-      throw new McpError(ErrorCode.InvalidParams, "to and subject are required");
+    if (args?.replyToMessageId) {
+      return await this.createThreadedDraft(args);
     }
 
-    const toRecipients = to.map((email) => ({ emailAddress: { address: email } }));
-    const ccRecipients = cc.map((email) => ({ emailAddress: { address: email } }));
-    const bccRecipients = bcc.map((email) => ({ emailAddress: { address: email } }));
+    const to: string[] = this.toEmailList(args?.to);
+    const subject: string = args?.subject;
+    const body: string = args?.body || "";
+    const cc: string[] = this.toEmailList(args?.cc);
+    const bcc: string[] = this.toEmailList(args?.bcc);
+    const bodyType: string = args?.bodyType || "HTML";
+
+    if (!to.length || !subject) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        "to and subject are required when creating a new draft (omit them only when replyToMessageId is set)"
+      );
+    }
 
     // Mirror send_email: if a signature image is saved, append it inline so the
     // draft already carries the branding the user expects when they hit send.
-    const sigFile = path.join(path.dirname(TOKEN_FILE), "signature.png");
-    const attachments: any[] = [];
-    let finalBody = body;
-
-    if (bodyType === "HTML" && fs.existsSync(sigFile)) {
-      const sigBytes = fs.readFileSync(sigFile).toString("base64");
-      const sigCid = "bay-view-signature";
-      attachments.push({
-        "@odata.type": "#microsoft.graph.fileAttachment",
-        name: "signature.png",
-        contentType: "image/png",
-        contentBytes: sigBytes,
-        isInline: true,
-        contentId: sigCid,
-      });
-      finalBody =
-        body +
-        `<br><br><a href="https://bayviewassociation.org" style="text-decoration:none">` +
-        `<img src="cid:${sigCid}" width="484" height="215" style="max-width:780px; display:block">` +
-        `</a>`;
-    }
+    const sig = bodyType === "HTML" ? this.loadSignature() : null;
+    const finalBody = sig ? body + sig.html : body;
 
     const message: any = {
       subject,
       body: { contentType: bodyType, content: finalBody },
-      toRecipients,
-      ccRecipients,
-      bccRecipients,
+      toRecipients: this.toRecipientObjects(to),
+      ccRecipients: this.toRecipientObjects(cc),
+      bccRecipients: this.toRecipientObjects(bcc),
     };
-    if (attachments.length > 0) {
-      message.attachments = attachments;
+    if (sig) {
+      message.attachments = [this.signatureAttachment(sig)];
     }
 
     const created: any = await this.graphRequestAsUser("/me/messages", "POST", message);
@@ -3289,7 +3345,115 @@ export class SharePointServer {
             draftId: created?.id,
             webLink: created?.webLink,
             subject: created?.subject ?? subject,
-            signatureIncluded: attachments.length > 0,
+            conversationId: created?.conversationId,
+            signatureIncluded: !!sig,
+          }),
+        },
+      ],
+    };
+  }
+
+  /**
+   * Create a draft that continues an existing conversation.
+   *
+   * Graph's createReply/createReplyAll/createForward return an unsent draft that
+   * already carries the conversationId and internet threading headers, plus the
+   * quoted original beneath. We prepend the authored text above that quote (never
+   * overwrite the body — that drops the thread history) and leave it unsent.
+   */
+  private async createThreadedDraft(args: any) {
+    const messageId: string = args.replyToMessageId;
+    const mode: string = args?.mode || "reply";
+    const to: string[] = this.toEmailList(args?.to);
+    const cc: string[] = this.toEmailList(args?.cc);
+    const bcc: string[] = this.toEmailList(args?.bcc);
+    const body: string = args?.body || "";
+    const bodyType: string = args?.bodyType || "HTML";
+    const subject: string | undefined = args?.subject;
+
+    if (!["reply", "replyAll", "forward"].includes(mode)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `mode must be one of reply, replyAll, forward (got "${mode}")`
+      );
+    }
+    if (mode === "forward" && !to.length) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        "to is required when mode is forward — a forward has no recipients to inherit"
+      );
+    }
+
+    const endpoint =
+      mode === "forward"
+        ? `/me/messages/${messageId}/createForward`
+        : mode === "replyAll"
+        ? `/me/messages/${messageId}/createReplyAll`
+        : `/me/messages/${messageId}/createReply`;
+
+    const draft: any = await this.graphRequestAsUser(endpoint, "POST", {});
+    const draftId: string = draft.id;
+
+    // The create response usually carries the seeded body and recipients, but
+    // re-read when anything we need is missing or when we have to merge into a
+    // recipient collection (a PATCH replaces the collection wholesale).
+    const needsRecipients = to.length > 0 || cc.length > 0 || bcc.length > 0;
+    let seeded: any = draft;
+    if (!seeded?.body?.content || (needsRecipients && !seeded?.toRecipients)) {
+      seeded = await this.graphRequestAsUser(
+        `/me/messages/${draftId}?$select=body,toRecipients,ccRecipients,bccRecipients`
+      );
+    }
+
+    const sig = this.loadSignature();
+    const authoredHtml =
+      (bodyType === "Text" ? this.textToHtml(body) : body) + (sig ? sig.html : "");
+
+    const patch: any = {
+      body: {
+        contentType: "HTML",
+        content: this.prependAboveQuote(seeded?.body?.content || "", authoredHtml),
+      },
+    };
+    if (subject) patch.subject = subject;
+    if (to.length) patch.toRecipients = this.mergeRecipients(seeded?.toRecipients, to);
+    if (cc.length) patch.ccRecipients = this.mergeRecipients(seeded?.ccRecipients, cc);
+    if (bcc.length) patch.bccRecipients = this.mergeRecipients(seeded?.bccRecipients, bcc);
+
+    const updated: any = await this.graphRequestAsUser(
+      `/me/messages/${draftId}`,
+      "PATCH",
+      patch
+    );
+
+    if (sig) {
+      await this.graphRequestAsUser(`/me/messages/${draftId}/attachments`, "POST",
+        this.signatureAttachment(sig));
+    }
+
+    const label = mode === "forward" ? "Forward" : mode === "replyAll" ? "Reply-all" : "Reply";
+    const recipients = (updated?.toRecipients ?? seeded?.toRecipients ?? [])
+      .map((r: any) => r?.emailAddress?.address)
+      .filter(Boolean);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            message:
+              `${label} draft saved to Drafts in the original conversation` +
+              (recipients.length ? ` for ${recipients.join(", ")}` : "") +
+              " — open in Outlook to tweak and send. Nothing was sent.",
+            draftId,
+            webLink: updated?.webLink ?? draft?.webLink,
+            subject: updated?.subject ?? subject ?? draft?.subject,
+            conversationId: updated?.conversationId ?? draft?.conversationId,
+            mode,
+            threadedFrom: messageId,
+            quotedHistoryIncluded: !!seeded?.body?.content,
+            signatureIncluded: !!sig,
           }),
         },
       ],
@@ -3312,13 +3476,13 @@ export class SharePointServer {
       throw new McpError(ErrorCode.InvalidParams, "messageId and comment are required");
     }
 
-    const ccRecipients = cc.map((email) => ({ emailAddress: { address: email } }));
-    const bccRecipients = bcc.map((email) => ({ emailAddress: { address: email } }));
+    const ccRecipients = this.toRecipientObjects(cc);
+    const bccRecipients = this.toRecipientObjects(bcc);
 
     // Check for signature file to decide whether to use createReply (supports attachments)
-    const sigFile = path.join(path.dirname(TOKEN_FILE), "signature.png");
+    const sig = this.loadSignature();
 
-    if (fs.existsSync(sigFile)) {
+    if (sig) {
       // Use createReply so we can attach the inline signature image
       const createEndpoint = replyAll
         ? `/me/messages/${messageId}/createReplyAll`
@@ -3327,49 +3491,37 @@ export class SharePointServer {
       const draft: any = await this.graphRequestAsUser(createEndpoint, "POST", {});
       const draftId: string = draft.id;
 
-      // createReply seeds the draft body with the quoted original thread. Fetch
-      // it so we can prepend our comment ABOVE the quote instead of overwriting
-      // the whole body — overwriting drops the thread history from the sent reply.
-      let quoted: string = draft.body?.content || "";
-      if (!quoted) {
-        const fetched: any = await this.graphRequestAsUser(
-          `/me/messages/${draftId}?$select=body`
+      // createReply seeds the draft body with the quoted original thread, and on
+      // replyAll seeds ccRecipients with everyone already on the thread. Read both
+      // back: we prepend our comment ABOVE the quote rather than overwriting the
+      // body (which drops thread history), and a PATCH of ccRecipients replaces
+      // the collection, so the seeded people must be merged in, not clobbered.
+      let seeded: any = draft;
+      const needsRecipients = ccRecipients.length > 0 || bccRecipients.length > 0;
+      if (!seeded?.body?.content || (needsRecipients && !seeded?.ccRecipients)) {
+        seeded = await this.graphRequestAsUser(
+          `/me/messages/${draftId}?$select=body,ccRecipients,bccRecipients`
         );
-        quoted = fetched?.body?.content || "";
       }
+      const quoted: string = seeded?.body?.content || "";
 
-      const sigBytes = fs.readFileSync(sigFile).toString("base64");
-      const sigCid = "bay-view-signature";
-      const reply =
-        comment +
-        `<br><br><a href="https://bayviewassociation.org" style="text-decoration:none">` +
-        `<img src="cid:${sigCid}" width="484" height="215" style="max-width:780px; display:block">` +
-        `</a>`;
-
-      // Insert our comment + signature at the top of the reply body, keeping the
-      // quoted thread beneath it. A function replacer avoids `$` in `reply` being
-      // read as a replacement pattern. Bare prepend if there's no <body> tag.
-      const htmlBody = /<body[^>]*>/i.test(quoted)
-        ? quoted.replace(/<body[^>]*>/i, (m) => m + reply)
-        : reply + quoted;
+      const reply = comment + sig.html;
+      const htmlBody = this.prependAboveQuote(quoted, reply);
 
       // Update the draft body (and any added cc/bcc) and the inline attachment.
-      // createReply pre-addresses toRecipients to the original sender; patching
-      // ccRecipients/bccRecipients adds to that without disturbing the To line.
+      // createReply pre-addresses toRecipients to the original sender; we leave
+      // that untouched so the To line is preserved.
       const draftPatch: any = {
         body: { contentType: "HTML", content: htmlBody },
       };
-      if (ccRecipients.length > 0) draftPatch.ccRecipients = ccRecipients;
-      if (bccRecipients.length > 0) draftPatch.bccRecipients = bccRecipients;
+      if (cc.length > 0) draftPatch.ccRecipients = this.mergeRecipients(seeded?.ccRecipients, cc);
+      if (bcc.length > 0) draftPatch.bccRecipients = this.mergeRecipients(seeded?.bccRecipients, bcc);
       await this.graphRequestAsUser(`/me/messages/${draftId}`, "PATCH", draftPatch);
-      await this.graphRequestAsUser(`/me/messages/${draftId}/attachments`, "POST", {
-        "@odata.type": "#microsoft.graph.fileAttachment",
-        name: "signature.png",
-        contentType: "image/png",
-        contentBytes: sigBytes,
-        isInline: true,
-        contentId: sigCid,
-      });
+      await this.graphRequestAsUser(
+        `/me/messages/${draftId}/attachments`,
+        "POST",
+        this.signatureAttachment(sig)
+      );
 
       await this.graphRequestAsUser(`/me/messages/${draftId}/send`, "POST", {});
     } else {
